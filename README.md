@@ -39,14 +39,13 @@ Root and command groups show help when invoked without a subcommand. Each comman
 
 ```text
 $ defi-tool pools scan --chain eth --top 3
-Source: DefiLlama public data (no API key) · Ethereum · 2026-10-28 20:35 UTC
-Uniswap pools sorted by TVL, highest first
+Source: DefiLlama public data (no API key) · Ethereum · 2026-10-29 09:21 UTC
+Pools sorted by TVL, highest first
 
-#  Pool        Version     Fee      TVL   1D vol   7D vol  1D vol/TVL     APR
-─  ──────────  ───────  ──────  ───────  ───────  ───────  ──────────  ──────
-1  WISE/WETH   v2         0.3%  $134.4M  $494.12   $28.0K       <0.01  <0.01%
-2  PYUSD/USDS  v4       <0.01%  $100.1M   $19.8M  $216.7M        0.20   0.04%
-3  WETH/USDT   v3         0.3%   $88.9M   $27.0M  $160.0M        0.30  33.21%
+#  Pool           Chain     DEX      Version     Fee      TVL  1D vol   7D vol  1D vol/TVL    APR  1D txns   Age
+─  ─────────────  ────────  ───────  ───────  ──────  ───────  ──────  ───────  ──────────  ─────  ───────  ────
+1  DAI/USDC/USDT  Ethereum  Curve    AMM           —  $160.0M  $48.6M        —        0.30  0.00%        —     —
+2  WISE/WETH      Ethereum  Uniswap  v2         0.3%  $131.0M  $27.7K   $55.6K       <0.01  0.02%        3  5.8y
 ```
 
 ```bash
@@ -87,26 +86,26 @@ defi-tool positions list --active --json
 ```
 
 ```text
-Uniswap positions · 0x902e…3f00 on all networks
-Source: Revert Finance (no API key) · 2026-10-29 08:22 UTC
-Open: 0 (value $0.00, unclaimed fees $0.00) · Closed: 4 · Lifetime fees $5.19 · PnL -$17.66
+Uniswap positions · ledger1 (0x902e…3f00) on Ethereum, Optimism, Polygon, Base, Arbitrum
+Source: Revert Finance (no API key) · 2026-10-29 09:21 UTC
+Open: 0 (value $0.00, unclaimed fees $0.00) · Closed: 4 · Lifetime fees $5.19 · PnL -$17.67
 
 Open positions (0)
   No open positions.
 
 Closed positions (4) · most recently closed first
-#  Chain     Pool                      ID  Range (min – max)    Exit price  Price now  Unit           Deposited  Withdrawn  Fees earned    Gas  Fee APR              PnL       IL  Opened      Closed      Held
-─  ────────  ──────────────────  ────────  ───────────────────  ──────────  ─────────  ─────────────  ─────────  ─────────  ───────────  ─────  ───────  ───────────────  ───────  ──────────  ──────────  ────
-1  Arbitrum  WETH/USDC 0.05% v3  #5723933  2,354.34 – 2,570.90    2,305.85   2,316.90  USDC per WETH     $78.36     $74.54        $2.81  $0.05   63.71%   -$1.06 (-1.4%)   -$3.82  2026-10-08  2026-10-29   20d
-2  Base      WETH/USDC 0.3% v3   #6285249  2,330.91 – 2,596.73    2,312.36   2,313.59  USDC per WETH     $96.25     $91.98        $2.07  $0.02   57.99%   -$2.21 (-2.3%)   -$4.26  2026-10-15  2026-10-29   13d
-3  Base      XDP/USDC 0.01% v3   #6236772  0.02200 – 0.03271       0.02167    0.01892  USDC per XDP      $71.36     $61.26        $0.19  $0.02   94.66%  -$9.93 (-13.9%)  -$10.10  2026-10-11  2026-10-12   25h
-4  Ethereum  AAVE/WETH 0.3% v3   #1373723  0.05131 – 0.06406       0.05655    0.05635  WETH per AAVE    $100.03     $97.95        $0.11  $2.50   24.15%   -$4.47 (-4.5%)   -$2.08  2026-09-26  2026-09-28   40h
+#  Chain     Pool                      ID  Range (min – max)    Exit price  Price now  Unit           Deposited  Withdrawn  Fees earned    Gas  Fee APR              PnL      IL  Opened      Closed      Held
+─  ────────  ──────────────────  ────────  ───────────────────  ──────────  ─────────  ─────────────  ─────────  ─────────  ───────────  ─────  ───────  ───────────────  ──────  ──────────  ──────────  ────
+1  Arbitrum  WETH/USDC 0.05% v3  #5723933  2,354.34 – 2,570.90    2,305.85   2,320.00  USDC per WETH     $78.36     $74.54        $2.81  $0.05   63.71%   -$1.06 (-1.4%)  -$1.28  2026-10-08  2026-10-29   20d
+2  Base      WETH/USDC 0.3% v3   #6285249  2,330.91 – 2,596.73    2,312.36   2,317.97  USDC per WETH     $96.25     $91.98        $2.07  $0.02   57.99%   -$2.21 (-2.3%)  -$1.35  2026-10-15  2026-10-29   13d
+3  Base      XDP/USDC 0.01% v3   #6236772  0.02200 – 0.03271       0.02167    0.01915  USDC per XDP      $71.36     $61.26        $0.19  $0.02   94.66%  -$9.93 (-13.9%)  -$3.31  2026-10-11  2026-10-12   25h
+4  Ethereum  AAVE/WETH 0.3% v3   #1373723  0.05131 – 0.06406       0.05655    0.05636  WETH per AAVE    $100.03     $97.95        $0.11  $2.51   24.15%   -$4.47 (-4.5%)  -$0.07  2026-09-26  2026-09-28   40h
 ```
 
 - **Open table:** current price, range (min – max), status (`● In range`, `▼ Below x%`, `▲ Above x%`), token balance, value, unclaimed fees, fees earned, fee APR, PnL and age, largest value first.
 - **Closed table:** range, exit price (pool price at the last withdrawal), price now, deposited, withdrawn, fees earned, gas, fee APR, PnL, impermanent loss (IL), opened and closed dates and time held, most recently closed first.
 - **Prices** use a stablecoin, then the wrapped native coin, as the quote when the pair has one (`USDC per WETH`, `WETH per AAVE`); the Unit column says which.
-- **Figures:** deposits, withdrawals, fees and gas are valued in USD at the time each happened. PnL = value now + withdrawals + fees − deposits − gas. Fee APR = fees earned ÷ deposits, annualized over the time held. IL compares the position with holding the deposited tokens.
+- **Figures:** deposits, withdrawals, fees and gas are valued in USD at the time each happened. PnL = value now + withdrawals + fees − deposits − gas. Fee APR = fees earned ÷ deposits, annualized over the time held. IL (impermanent loss) compares the position with holding the deposited tokens, fees excluded: the tokens it returned minus the tokens deposited, both valued at the exit price for a closed position (later price moves affect the tokens either way) or today's price for an open one. It is not withdrawals minus deposits, which also counts the market's move; Revert's own `il` figure is that, so it is used only when amounts or prices are missing.
 - **Options:** `--active` or `--past` shows one table (both by default). `--top` limits each table (default 100, up to 1000). `--chain` narrows the networks. `--wallet` takes saved names (see [Wallets](#wallets)), each read only on its saved network; `--wallet-addr` takes addresses, read on every network. Without either, every saved wallet is read, plus addresses saved by `init`. Solana wallets are skipped with a note. `--json` prints `{ "data": { "active": [...], "past": [...] } }`.
 - **Data source:** [Revert Finance](https://revert.finance)'s public positions API, without a key: one request per address finds open and closed positions on every network, with their full history. Uniswap's own APIs do not list positions (the Trading API key is not used), and free public RPCs cannot search an address's history on L2s. Revert is a third-party service: its data can lag by a few minutes.
 - **Fallback:** if Revert cannot be reached (or with `--source rpc`), the position NFTs the wallet still holds are read over public RPC, with USD prices from DefiLlama: price, range, status, balance and unclaimed fees are shown, but deposits, fees collected, PnL and dates are not, and burned NFTs are missed. Columns without any value are left out. `--source revert` fails instead of falling back. On-chain reads cover v3; v4 NFTs cannot be enumerated without an indexer.

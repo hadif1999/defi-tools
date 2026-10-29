@@ -46,7 +46,7 @@ const positionSchema = z.object({
   deposits_value: number,
   withdrawals_value: number,
   first_mint_ts: number,
-  performance: z.object({ usd: z.object({ pnl: number, il: number }).partial().optional() }).partial().optional(),
+  performance: z.object({ usd: z.object({ pnl: number }).partial().optional(), hodl: z.object({ il: number }).partial().optional() }).partial().optional(),
   cash_flows: z.array(z.unknown()).default([]),
 });
 type Row = z.infer<typeof positionSchema>;
@@ -117,6 +117,16 @@ export class RevertClient {
     // PnL in USD: what came out (withdrawals, fees, value still in the position) minus what went in and gas.
     const pnl = deposited !== undefined && withdrawn !== undefined && fees !== undefined && row.underlying_value !== undefined
       ? row.underlying_value + withdrawn + fees - deposited - gas : row.performance?.usd?.pnl;
+    // Impermanent loss: the tokens the position gave back (withdrawals plus what it still holds) minus the tokens deposited,
+    // valued at one set of prices: at the last withdrawal for a closed position (later moves happen to tokens you hold anyway),
+    // today's for an open one. Fees are not included. Revert's performance.usd.il is withdrawals minus deposits at different
+    // times, which also counts the market's move, so it is used only when amounts or prices are missing.
+    const net = (side: 'amount0' | 'amount1', current: number | undefined) => flows.filter((flow) => flow.type === 'deposits' || flow.type === 'withdrawals')
+      .reduce((total, flow) => total + (flow[side] ?? 0), current ?? 0);
+    const [ilPrice0, ilPrice1] = active ? [token0.priceUsd, token1.priceUsd] : [exit?.prices?.token0?.usd, exit?.prices?.token1?.usd];
+    const il = ilPrice0 !== undefined && ilPrice1 !== undefined && flows.some((flow) => flow.type === 'deposits')
+      ? net('amount0', active ? row.current_amount0 : 0) * ilPrice0 + net('amount1', active ? row.current_amount1 : 0) * ilPrice1
+      : row.performance?.hodl?.il;
     const iso = (seconds: number | undefined) => seconds === undefined ? undefined : new Date(seconds * 1000).toISOString();
     return {
       id: row.nft_id, chainId, dex: 'Uniswap', protocol, wallet: (row.owner ?? wallet).toLowerCase(), pool: row.pool,
@@ -128,7 +138,7 @@ export class RevertClient {
       amount0: row.current_amount0, amount1: row.current_amount1, valueUsd: row.underlying_value,
       uncollectedFees0: row.uncollected_fees0, uncollectedFees1: row.uncollected_fees1, uncollectedFeesUsd: uncollected,
       feesEarnedUsd: fees, depositedUsd: deposited, withdrawnUsd: withdrawn, gasUsd: gas,
-      pnlUsd: pnl, ilUsd: row.performance?.usd?.il,
+      pnlUsd: pnl, ilUsd: il,
       feeAprPct: annualize(ratio(fees), days), totalAprPct: annualize(ratio(pnl), days),
       openedAt: iso(row.first_mint_ts), closedAt: iso(closedTs),
       source: 'revert', historyAvailable: true,

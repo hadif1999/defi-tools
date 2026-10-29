@@ -36,7 +36,8 @@ test('maps open and closed positions, valuing deposits, withdrawals and fees whe
   near(closed!.feesEarnedUsd, 2.793);
   near(closed!.gasUsd, 0.041);
   near(closed!.pnlUsd, -1.0696); // Agrees with Revert's own -1.064 within rounding.
-  near(closed!.ilUsd, -3.8215);
+  // Tokens out minus tokens in at the exit prices: 0.013792 WETH × $2,305.85 − 33.078 USDC; Revert's usd.il (-3.82) also counts ETH's fall.
+  near(closed!.ilUsd, -1.2758);
   near(closed!.feeAprPct, 63.34, 0.05);
   assert.equal(closed!.openedAt, '2026-10-08T18:33:34.000Z');
   assert.equal(closed!.closedAt, new Date(1793258847 * 1000).toISOString());
@@ -51,6 +52,7 @@ test('maps open and closed positions, valuing deposits, withdrawals and fees whe
   near(open!.feesEarnedUsd, 1.54); // $1 claimed + $0.54 unclaimed.
   near(open!.pnlUsd, 1.44);
   near(open!.feeAprPct, 114.71, 0.05); // Over 10 days held.
+  near(open!.ilUsd, 0); // Still holds exactly what was deposited.
 });
 
 test('keeps only the requested networks and follows pagination', async () => {

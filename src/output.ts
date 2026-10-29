@@ -267,7 +267,7 @@ export function printPositionTables(active: LpPosition[], past: LpPosition[], op
   if (!shown.length) return;
   const notes = ['Prices are in the Unit column: the quote is a stablecoin or the wrapped native coin when the pair has one.'];
   if (shown.some((position) => position.historyAvailable)) notes.push('Fees earned: collected plus unclaimed, over the position\'s life. Fee APR: fees earned ÷ deposits, annualized over the time held.',
-    'PnL: value now + withdrawals + fees − deposits − gas, each in USD when it happened. IL: impermanent loss against holding the deposited tokens.');
+    'PnL: value now + withdrawals + fees − deposits − gas, each in USD when it happened. IL: impermanent loss, fees excluded: what the position returned minus the deposited tokens, both valued at the exit price (today\'s for open positions).');
   if (shown.some((position) => !position.historyAvailable)) notes.push('On-chain data only: deposits, withdrawals, collected fees, PnL and dates are unknown, and closed positions are the NFTs the wallet still holds.');
   if (shownPast.length) notes.push(shownPast.some((position) => position.exitPrice !== undefined) ? 'Exit price: pool price at the last withdrawal. Price now: current pool price.' : 'Price now: current pool price.');
   if (missing) notes.push('— means the source has no value for that position.');

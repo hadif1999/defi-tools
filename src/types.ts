@@ -174,7 +174,7 @@ export interface LpPosition {
   gasUsd?: number;
   /** Profit or loss in USD: value now + withdrawals + fees earned − deposits − gas, each valued when it happened. */
   pnlUsd?: number;
-  /** Impermanent loss in USD against holding the deposited tokens. */
+  /** Impermanent loss in USD, fees excluded: the tokens the position returned minus the tokens deposited, at the exit prices (closed) or today's (open). */
   ilUsd?: number;
   /** Fees earned / deposits, annualized over the time held, in percent. */
   feeAprPct?: number;

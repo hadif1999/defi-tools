@@ -46,7 +46,7 @@ commandHelp(init, ['defi-tool init', 'defi-tool init --wallet 0xYourWallet --cha
   `Configuration: ${DEFAULT_CONFIG_PATH} (override with --config or DEFI_TOOL_CONFIG).`,
   'Existing configuration is protected unless --force is supplied.',
   'Public pools and direct RPC position reads do not require API keys.',
-  'RPC URLs can also come from RPC_URL_ETH, RPC_URL_ARB, RPC_URL_OP, RPC_URL_BASE, RPC_URL_POLYGON.',
+  `RPC URLs can also come from ${(Object.keys(CHAINS).map(Number) as ChainId[]).filter(isEvmChain).map((chain) => `RPC_URL_${CHAINS[chain].slug.toUpperCase()}`).join(', ')}.`,
 ]);
 init.action((options) => runSetup(options, configPath()));
 
@@ -325,7 +325,7 @@ function parsePair(value: string): [string, string] {
 const positions = app.command('positions').description('List your Uniswap LP positions (open and closed) or check their ranges.');
 commandHelp(positions, ['defi-tool positions list', 'defi-tool positions list --wallet wallet0', 'defi-tool positions list --wallet-addr 0xYourWallet --past', 'defi-tool positions analyze --wallet 0xYourWallet --chain eth'], [
   'list shows open and closed positions with prices, ranges, balances, fees, APR and PnL. analyze checks range status only (used by alerts).',
-  'Uses wallets saved with defi-tool wallet add (each on its network) or init, or pass --wallet. list is an alias for analyze.',
+  'Uses wallets saved with defi-tool wallet add (each on its network) or init, or pass --wallet; list also takes --wallet-addr. ls is an alias for list.',
 ]);
 positions.action(() => positions.outputHelp());
 const list = positions.command('list').alias('ls')

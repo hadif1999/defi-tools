@@ -35,7 +35,7 @@ test('positions list shows open and closed positions as two tables, by saved wal
     assert.match(all.stdout, /Open positions \(1\) · largest value first\n#\s+Pool\s+ID\s+Price\s+Range \(min – max\)\s+Unit\s+Status\s+Balance\s+Value\s+Unclaimed\s+Fees earned\s+Fee APR\s+PnL\s+Age/);
     assert.match(all.stdout, /1\s+WETH\/USDC 0\.3% v3\s+#999\s+2,400\.00\s+2,300\.00 – 2,500\.00\s+USDC per WETH\s+● In range\s+0\.01000 WETH \+ 25\.0000 USDC\s+\$49\.00\s+\$0\.54\s+\$1\.54\s+11\d\.\d\d%\s+\+\$1\.44 \(\+2\.9%\)\s+10d/);
     assert.match(all.stdout, /Closed positions \(2\) · most recently closed first\n#\s+Chain\s+Pool\s+ID\s+Range \(min – max\)\s+Exit price\s+Price now\s+Unit\s+Deposited\s+Withdrawn\s+Fees earned\s+Gas\s+Fee APR\s+PnL\s+IL\s+Opened\s+Closed\s+Held/);
-    assert.match(all.stdout, /1\s+Arbitrum\s+WETH\/USDC 0\.05% v3\s+#5723933\s+2,354\.34 – 2,570\.90\s+2,305\.85\s+2,312\.12\s+USDC per WETH\s+\$78\.36\s+\$74\.54\s+\$2\.79\s+\$0\.04\s+63\.\d+%\s+-\$1\.07 \(-1\.4%\)\s+-\$3\.82\s+2026-10-08\s+2026-10-29\s+20d/);
+    assert.match(all.stdout, /1\s+Arbitrum\s+WETH\/USDC 0\.05% v3\s+#5723933\s+2,354\.34 – 2,570\.90\s+2,305\.85\s+2,312\.12\s+USDC per WETH\s+\$78\.36\s+\$74\.54\s+\$2\.79\s+\$0\.04\s+63\.\d+%\s+-\$1\.07 \(-1\.4%\)\s+-\$1\.28\s+2026-10-08\s+2026-10-29\s+20d/);
     assert.match(all.stdout, /2\s+Ethereum\s+WETH\/USDC 0\.05% v3\s+#1373723/);
     assert.doesNotMatch(all.stdout, /— means/); // Every value is known.
 
