@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+*.db
+*.db-shm
+*.db-wal
+.defi-tool/
+uniswap.secret
+graphify-out/
+src/graphify-out/

@@ -1,0 +1,29 @@
+{
+  "name": "defi-tool",
+  "version": "0.1.0",
+  "description": "Read-only DeFi pool (Uniswap, Raydium) and Uniswap LP position intelligence CLI",
+  "type": "module",
+  "bin": {
+    "defi-tool": "bin/defi-tool.mjs"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "start": "node bin/defi-tool.mjs",
+    "install-cli": "bash scripts/install.sh"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "viem": "^2.21.54",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "wallet-cli-usage",
+  "cliVersion": "2.13.0",
+  "contentHash": "2f452faf09bca7580faed2f2adce86ae68b867d9036f13c6b468420983a174a3",
+  "files": {
+    "SKILL.md": "24f9ec9cb68411dc58b81d3387cde2b72329126a302c6eee34a823d878757a5a",
+    "references/business-logic.md": "354f3c09b94214af6878e8d26d1fe57f63fc22a3135ffc98fe83d7c7c1d1a0b5"
+  },
+  "installedAt": "2026-10-29T08:17:15.558Z"
+}
