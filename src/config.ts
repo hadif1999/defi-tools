@@ -11,6 +11,7 @@ export const DEFAULT_DATABASE_PATH = join(homedir(), '.local', 'share', 'defi-to
 const configSchema = z.object({
   apiUrl: z.string().url().default(DEFAULT_API_URL),
   apiKey: z.string().min(1).optional(),
+  alchemyApiKey: z.string().min(1).optional(),
   rpcUrls: z.record(z.string().url()).default({}),
   chains: z.array(z.coerce.number().int()).nonempty().refine((chains) => chains.every((chain) => chain in CHAINS), 'chains contains an unsupported chain; run defi-tool chains').default([1, 10, 137, 8453, 42161]), // The original networks; --chain all adds the rest.
   wallets: z.array(z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'Wallet must be a 0x address with 40 hexadecimal characters')).default([]),
@@ -28,6 +29,7 @@ function envConfig(): Partial<AppConfig> {
   const result: Partial<AppConfig> = { rpcUrls };
   if (process.env.UNISWAP_API_URL) result.apiUrl = process.env.UNISWAP_API_URL;
   if (process.env.UNISWAP_API_KEY) result.apiKey = process.env.UNISWAP_API_KEY;
+  if (process.env.ALCHEMY_API_KEY) result.alchemyApiKey = process.env.ALCHEMY_API_KEY;
   if (process.env.DEFI_TOOL_WALLETS) result.wallets = process.env.DEFI_TOOL_WALLETS.split(',').map((x) => x.trim()).filter(Boolean);
   if (process.env.DEFI_TOOL_DB_PATH) result.databasePath = process.env.DEFI_TOOL_DB_PATH;
   return result;

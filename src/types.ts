@@ -196,9 +196,41 @@ export interface SavedWallet {
   updatedAt: string;
 }
 
+/** One token moving in or out of a wallet in a transaction; amounts have decimals applied. */
+export interface Leg { symbol: string; /** Token contract; absent for the native coin. */ address?: string; amount: number; valueUsd?: number }
+
+export const ACTIVITY_KINDS = ['swap', 'add-liquidity', 'remove-liquidity', 'collect-fees', 'send', 'receive', 'wrap', 'unwrap', 'other'] as const;
+export type ActivityKind = typeof ACTIVITY_KINDS[number];
+
+/** One wallet transaction for wallet history: what moved, valued at the time it happened. */
+export interface WalletActivity {
+  chainId: EvmChainId;
+  hash: string;
+  timestamp: string;
+  kind: ActivityKind;
+  sent: Leg[];
+  received: Leg[];
+  /** LP fees collected in the transaction (also when liquidity was removed at the same time). */
+  fees?: Leg[];
+  /** The other address for sends and receives. */
+  counterparty?: string;
+  positionId?: string;
+  /** "WETH/USDC 0.05% v3" for liquidity transactions. */
+  pool?: string;
+  /** Fee the wallet paid to send the transaction, in the native coin and USD; absent when another address sent it. */
+  gasNative?: number;
+  gasUsd?: number;
+  /** Received only unknown, unpriced tokens: most likely an unsolicited airdrop. */
+  spam?: boolean;
+  source: 'revert' | 'alchemy';
+  explorerUrl?: string;
+}
+
 export interface AppConfig {
   apiUrl: string;
   apiKey?: string;
+  /** Alchemy key for wallet history (swaps and transfers); never sent anywhere but Alchemy. */
+  alchemyApiKey?: string;
   rpcUrls: Partial<Record<ChainId, string>>;
   chains: ChainId[];
   wallets: string[];

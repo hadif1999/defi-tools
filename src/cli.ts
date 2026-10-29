@@ -13,13 +13,15 @@ import { DefiLlamaPoolsClient, defiLlamaListsChain } from './providers/defillama
 import { RpcProvider } from './providers/rpc.js';
 import { DexScreenerClient, normalizeAddress, similarTvl, type PoolDetails } from './providers/dexscreener.js';
 import { hooklessV4PoolId } from './providers/pool-address.js';
-import { poolDex, printCreatePlan, printPoolList, printPools, printPositions, printPositionTables, printWallets, type Signer } from './output.js';
+import { poolDex, printCreatePlan, printHistory, printPoolList, printPools, printPositions, printPositionTables, printWallets, type Signer } from './output.js';
 import { parseAmount, parseDeadline, parseLimit, planPosition } from './create-position.js';
 import { CREATE_CHAINS } from './providers/tokens.js';
 import { walletBalances } from './providers/balances.js';
+import { AlchemyClient } from './providers/alchemy.js';
+import { walletHistory } from './history.js';
 import { RevertClient } from './providers/revert.js';
 import { loadPortfolio, splitPositions, type PositionSource, type WalletGroup } from './positions.js';
-import { CHAINS, DEXES, SOLANA, POOL_SORTS, POOL_VERSIONS, isEvmChain, type AppConfig, type Dex, type EvmChainId, type PoolScore, type ChainId, type Pool, type PoolSort, type PoolVersion, type PositionAnalysis, type Protocol, type SavedWallet } from './types.js';
+import { ACTIVITY_KINDS, CHAINS, DEXES, SOLANA, type ActivityKind, POOL_SORTS, POOL_VERSIONS, isEvmChain, type AppConfig, type Dex, type EvmChainId, type PoolScore, type ChainId, type Pool, type PoolSort, type PoolVersion, type PositionAnalysis, type Protocol, type SavedWallet } from './types.js';
 
 const DEFAULT_TOP = 25;
 
@@ -595,8 +597,8 @@ function groupLabel(group: WalletGroup): string {
   return `${names.length ? `${names.join(', ')} (${address})` : address} on ${networks}`;
 }
 
-const wallet = app.command('wallet').description('Save, list, rename, and delete the wallets that positions and alerts check.');
-commandHelp(wallet, ['defi-tool wallet add 0xYourWallet --chain eth --name main', 'defi-tool wallet list', 'defi-tool wallet edit main --name trading', 'defi-tool wallet delete trading'], [
+const wallet = app.command('wallet').description('Save, list, rename, and delete wallets; show their balances and transaction history.');
+commandHelp(wallet, ['defi-tool wallet add 0xYourWallet --chain eth --name main', 'defi-tool wallet list', 'defi-tool wallet history main', 'defi-tool wallet edit main --name trading', 'defi-tool wallet delete trading'], [
   'Wallets are saved in the local database by name. Only public addresses are stored; no private key is ever requested.',
   'positions and alerts check every saved wallet on its network, or the ones named in --wallet.',
 ]);
@@ -632,6 +634,49 @@ walletList.action((options: { balance: boolean; json?: boolean }) => withStore(a
     : undefined;
   printWallets(wallets, balances, Boolean(options.json));
   if (!options.json && config.wallets.length) console.log(`\nAlso checked: ${config.wallets.length} wallet address(es) saved by init in the configuration file.`);
+}));
+
+const walletHistoryCommand = wallet.command('history').alias('tx')
+  .description('Show a wallet\'s latest transactions: swaps, liquidity adds and removes, fee collects, transfers, with USD values and gas.')
+  .argument('<wallet>', 'saved wallet name, or a 0x address')
+  .option('--chain <names>', 'networks, e.g. base,arb or all (default: the saved wallet\'s network; every network for an address)')
+  .option('--days <count>', 'how far back to look, 1-365 days (default: 30)', '30')
+  .option('--type <kinds>', `only these kinds, comma-separated: ${ACTIVITY_KINDS.join(', ')}, or lp (all liquidity kinds)`)
+  .option('--top <count>', 'rows to show, 1-500 (default: 50)', '50')
+  .option('--all', 'also show likely spam airdrops (unknown, unpriced tokens)')
+  .option('--json', 'print structured JSON with full hashes and explorer links');
+commandHelp(walletHistoryCommand, ['defi-tool wallet history ledger1', 'defi-tool wallet history ledger1 --chain base,arb --days 90', 'defi-tool wallet history ledger1 --type swap --top 20', 'defi-tool wallet history 0xYourWallet --type lp --json'], [
+  'Liquidity activity (Uniswap v3/v4 adds, removes and fee collects) comes from Revert Finance, without a key.',
+  'Swaps, sends, receives and wraps need a free Alchemy key: export ALCHEMY_API_KEY=... (or alchemyApiKey in the configuration file).',
+  'Values are USD at the time of each transaction (DefiLlama). Swap cost = value sent − value received: price impact, pool fees and MEV.',
+  'Likely spam airdrops are hidden unless --all. Approvals and transactions that moved no tokens are not listed.',
+]);
+walletHistoryCommand.action((target: string, options: { chain?: string; days: string; type?: string; top: string; all?: boolean; json?: boolean }) => withStore(async (store, config) => {
+  const days = parsePositiveInt(options.days, '--days')!;
+  if (days > 365) throw new Error('--days supports 1 through 365.');
+  const top = parsePositiveInt(options.top, '--top')!;
+  if (top > 500) throw new Error('--top supports 1 through 500.');
+  const saved = store.wallet(target);
+  if (saved && !isEvmChain(saved.chainId)) throw new Error(`"${saved.name}" is a Solana wallet; history covers EVM networks.`);
+  const address = saved?.address ?? target.trim().toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(address)) throw new Error(`"${target}" is neither a saved wallet name nor a 0x address. Run defi-tool wallet list to see saved names.`);
+  const evm = (Object.keys(CHAINS).map(Number) as ChainId[]).filter(isEvmChain);
+  const chains = (parseChains(options.chain) ?? (saved ? [saved.chainId] : evm)).filter(isEvmChain);
+  if (!chains.length) throw new Error('History covers EVM networks; choose one with --chain, e.g. --chain base.');
+  let kinds: ActivityKind[] | undefined;
+  if (options.type !== undefined) {
+    kinds = [...new Set(options.type.toLowerCase().split(',').map((kind) => kind.trim()).flatMap((kind) => kind === 'lp' ? ['add-liquidity', 'remove-liquidity', 'collect-fees'] : [kind]))] as ActivityKind[];
+    const unknown = kinds.find((kind) => !(ACTIVITY_KINDS as readonly string[]).includes(kind));
+    if (unknown !== undefined) throw new Error(`--type "${unknown || '(empty)'}" is not a kind. Use ${ACTIVITY_KINDS.join(', ')}, or lp.`);
+  }
+  const alchemy = config.alchemyApiKey || process.env.DEFI_TOOL_ALCHEMY_URL
+    ? new AlchemyClient({ apiKey: config.alchemyApiKey ?? '', endpoint: process.env.DEFI_TOOL_ALCHEMY_URL }) : undefined;
+  if (!alchemy && !options.json) console.error('Note: ALCHEMY_API_KEY is not set, so only liquidity activity is shown. A free key adds swaps and transfers.');
+  const result = await walletHistory({
+    address, chains, since: Math.floor(Date.now() / 1000) - days * 86_400, kinds, top, includeSpam: Boolean(options.all), pricesUrl: process.env.DEFI_TOOL_PRICES_URL,
+  }, { revert: new RevertClient({ endpoint: process.env.DEFI_TOOL_REVERT_URL }), alchemy }, (message) => console.error(message));
+  const networks = chains.length === evm.length ? 'all networks' : chains.map((chain) => CHAINS[chain].name).join(', ');
+  printHistory(result, { json: Boolean(options.json), title: `Wallet history · ${saved ? `${saved.name} (${shortAddress(address)})` : shortAddress(address)} on ${networks}`, days });
 }));
 
 const walletDelete = wallet.command('delete').alias('rm').description('Delete a saved wallet by name.')
@@ -719,3 +764,6 @@ app.parseAsync().catch((error: unknown) => {
   console.error('Add --help after your command for usage and examples.');
   process.exitCode = 1;
 });
+
+/** 0x902e…3f00. */
+function shortAddress(address: string): string { return `${address.slice(0, 6)}…${address.slice(-4)}`; }

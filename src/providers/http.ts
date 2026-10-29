@@ -1,13 +1,16 @@
 /**
- * GET a JSON document, turning network failures into messages that name the service and suggest a next step.
- * Connection failures and 5xx responses are retried once; rate limits (429) are not.
+ * GET a JSON document (or POST one, when a body is given, as for JSON-RPC), turning network failures into messages that
+ * name the service and suggest a next step. Connection failures and 5xx responses are retried once; rate limits (429) are not.
+ * Messages name only the host, so keys in the URL path never appear in them.
  */
-export async function getJson(fetcher: typeof fetch, url: string, name: string, timeoutMs: number, retryDelayMs = 1_000): Promise<unknown> {
+export async function getJson(fetcher: typeof fetch, url: string, name: string, timeoutMs: number, retryDelayMs = 1_000, body?: unknown): Promise<unknown> {
   const service = `${name} (${new URL(url).host})`;
   let response: Response | undefined;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
-      response = await fetcher(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(timeoutMs) });
+      response = await fetcher(url, body === undefined
+        ? { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(timeoutMs) }
+        : { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
       if (response.status < 500 || attempt === 2) break;
     } catch (error) {
       const kind = (error as Error).name;

@@ -1,6 +1,8 @@
 import type { LpPosition, Pool, PoolScore, PoolSort, PositionAnalysis } from './types.js';
 import { invertPrice, rangePosition } from './positions-math.js';
 import type { WalletBalance } from './providers/balances.js';
+import { activityValue, swapResult, type HistoryResult } from './history.js';
+import { ACTIVITY_KINDS, type ActivityKind, type Leg, type WalletActivity } from './types.js';
 import type { CreatePlan, PlanTransaction } from './create-position.js';
 import { CHAINS, type SavedWallet } from './types.js';
 
@@ -335,5 +337,64 @@ export function printCreatePlan(plan: CreatePlan, options: { json: boolean; sign
   const notes = ['Nothing has been signed or sent. Sign each transaction with the wallet above, in order, waiting for each to confirm.'];
   if (plan.simulation.status === 'after-approvals') notes.push('After the approvals confirm, run this command again: it rebuilds the mint at the latest price and simulates it.');
   if (commands) notes.push('Check any step with: mm decode --payload <data>. --signer raw prints to/value/data for any other wallet.');
+  console.log(`\n${notes.join('\n')}`);
+}
+
+const kindLabels: Record<ActivityKind, string> = {
+  swap: 'Swap', 'add-liquidity': 'Add liquidity', 'remove-liquidity': 'Remove liquidity', 'collect-fees': 'Collect fees',
+  send: 'Send', receive: 'Receive', wrap: 'Wrap', unwrap: 'Unwrap', other: 'Other',
+};
+const shortAddress = (address: string) => `${address.slice(0, 6)}…${address.slice(-4)}`;
+const legsText = (legs: Leg[]) => legs.map((leg) => `${formatNumber(leg.amount)} ${leg.symbol}`).join(' + ') || '—';
+
+/** One line saying what moved: "0.0100 WETH → 23.1000 USDC (−$0.08)", "WETH/USDC 0.05% v3 #57 → 0.0323 WETH". */
+export function activityDetails(activity: WalletActivity): string {
+  const position = activity.pool ? `${activity.pool}${activity.positionId ? ` #${activity.positionId}` : ''}` : '';
+  const others = (activity.counterparty ?? '').split(', ').filter(Boolean).map(shortAddress).join(', ');
+  switch (activity.kind) {
+    case 'swap': case 'wrap': case 'unwrap': case 'other': {
+      const result = swapResult(activity);
+      return `${legsText(activity.sent)} → ${legsText(activity.received)}${result !== undefined && Math.abs(result) >= 0.005 ? ` (${formatSignedUsd(result)})` : ''}`;
+    }
+    case 'add-liquidity': return `${legsText(activity.sent)} → ${position}`;
+    case 'remove-liquidity': return `${position} → ${legsText(activity.received)}${activity.fees?.length ? ` + fees ${legsText(activity.fees)}` : ''}`;
+    case 'collect-fees': return `${position} → ${legsText(activity.received)}`;
+    case 'send': return `${legsText(activity.sent)} → ${others}`;
+    case 'receive': return `${legsText(activity.received)} ← ${others}`;
+  }
+}
+
+/** Wallet history: a summary of the period, then one row per transaction, newest first. */
+export function printHistory(result: HistoryResult, options: { json: boolean; title: string; days: number }): void {
+  if (options.json) return console.log(JSON.stringify({ schemaVersion: 1, data: { total: result.total, spamHidden: result.spamHidden, summary: result.summary, sources: result.sources, activities: result.activities } }, null, 2));
+  const { activities, summary } = result;
+  console.log(`${options.title} · last ${options.days} day${options.days === 1 ? '' : 's'}`);
+  console.log(`Source: ${result.sources.join(' and ') || 'none'} · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC`);
+  if (!activities.length) {
+    console.log('\nNo transactions in this period. Try a longer --days, another --chain, or fewer --type filters.');
+  } else {
+    const counts = ACTIVITY_KINDS.filter((kind) => summary.byKind[kind]).map((kind) => `${summary.byKind[kind]} ${kindLabels[kind].toLowerCase()}`).join(', ');
+    const totals = [
+      summary.swapVolumeUsd ? `swapped ${formatUsd(summary.swapVolumeUsd)} (cost ${formatUsd(Math.max(0, summary.swapCostUsd))})` : '',
+      summary.addedUsd ? `added ${formatUsd(summary.addedUsd)}` : '', summary.removedUsd ? `removed ${formatUsd(summary.removedUsd)}` : '',
+      summary.feesCollectedUsd ? `fees collected ${formatUsd(summary.feesCollectedUsd)}` : '', `gas ${formatUsd(summary.gasUsd)}`,
+    ].filter(Boolean).join(' · ');
+    console.log(`${result.total > activities.length ? `Showing ${activities.length} of ${result.total} transactions` : `${activities.length} transaction${activities.length === 1 ? '' : 's'}`}: ${counts}`);
+    console.log(`${totals}\n`);
+    const chain = new Set(activities.map((activity) => activity.chainId)).size > 1;
+    const columns: Column[] = [
+      { header: '#', align: 'right' }, { header: 'Time (UTC)' }, ...(chain ? [{ header: 'Chain' }] : []), { header: 'Type' },
+      { header: 'Details', max: 96 }, { header: 'Value', align: 'right' }, { header: 'Gas', align: 'right' }, { header: 'Tx' },
+    ];
+    console.log(renderTable(columns, activities.map((activity, index) => [
+      String(index + 1), formatTime(activity.timestamp), ...(chain ? [CHAINS[activity.chainId].name] : []), kindLabels[activity.kind] + (activity.spam ? ' (spam?)' : ''),
+      activityDetails(activity), formatUsd(activityValue(activity)), activity.gasUsd !== undefined ? formatUsd(activity.gasUsd) : activity.gasNative === undefined ? MISSING : `${formatNumber(activity.gasNative)} ${CHAINS[activity.chainId].native}`,
+      shortAddress(activity.hash),
+    ])));
+  }
+  const notes = ['Values are in USD at the time of each transaction. Gas is shown for transactions this wallet sent; swap cost = value sent − value received.'];
+  if (result.spamHidden) notes.push(`${result.spamHidden} likely spam airdrop(s) of unknown, unpriced tokens hidden; --all shows them.`);
+  if (!result.sources.includes('Alchemy')) notes.push('Swaps and transfers need a free Alchemy key: export ALCHEMY_API_KEY=... (https://dashboard.alchemy.com). Liquidity activity needs no key.');
+  else notes.push('Approvals and transactions that moved no tokens are not listed. --json gives full hashes and explorer links.');
   console.log(`\n${notes.join('\n')}`);
 }

@@ -1,12 +1,11 @@
 import { formatUnits, parseAbi, type Address } from 'viem';
 import { CHAINS, isEvmChain, type SavedWallet } from '../types.js';
 import type { RpcProvider } from './rpc.js';
-import { coinPrices, priceKey } from './prices.js';
+import { assetPriceKey, coinPrices } from './prices.js';
 import { knownTokens } from './tokens.js';
 
 // Solana's public RPC (no key); getBalance returns lamports.
 export const SOLANA_RPC_URL = 'https://api.mainnet-beta.solana.com';
-const nativePriceKeys: Record<string, string> = { ETH: 'coingecko:ethereum', BNB: 'coingecko:binancecoin', POL: 'coingecko:polygon-ecosystem-token', SOL: 'coingecko:solana' };
 const erc20Abi = parseAbi(['function balanceOf(address) view returns (uint256)', 'function decimals() view returns (uint8)', 'function symbol() view returns (string)']);
 
 export interface Holding { symbol: string; amount: number; valueUsd?: number }
@@ -42,7 +41,7 @@ async function holdings(wallet: SavedWallet, rpc: RpcProvider, options: { solana
     });
     const body = await response.json().catch(() => ({})) as { result?: { value?: unknown }; error?: { message?: string } };
     if (typeof body.result?.value !== 'number') throw new Error(`Solana RPC: ${body.error?.message ?? `HTTP ${response.status}`}`);
-    return [{ symbol: native, amount: body.result.value / 1e9, priceKey: nativePriceKeys[native]! }];
+    return [{ symbol: native, amount: body.result.value / 1e9, priceKey: 'coingecko:solana' }];
   }
   const chainId = wallet.chainId;
   const client = rpc.client(chainId);
@@ -51,8 +50,8 @@ async function holdings(wallet: SavedWallet, rpc: RpcProvider, options: { solana
     const balance = await client.readContract({ address: address as Address, abi: erc20Abi, functionName: 'balanceOf', args: [owner] });
     if (balance === 0n) return [];
     const [symbol, decimals] = await Promise.all([client.readContract({ address: address as Address, abi: erc20Abi, functionName: 'symbol' }), client.readContract({ address: address as Address, abi: erc20Abi, functionName: 'decimals' })]);
-    return [{ symbol, amount: Number(formatUnits(balance, decimals)), priceKey: priceKey(chainId, address) }];
+    return [{ symbol, amount: Number(formatUnits(balance, decimals)), priceKey: assetPriceKey(chainId, address) }];
   }));
   const coin = await client.getBalance({ address: owner });
-  return [{ symbol: native, amount: Number(formatUnits(coin, 18)), priceKey: nativePriceKeys[native]! }, ...tokens.flat()];
+  return [{ symbol: native, amount: Number(formatUnits(coin, 18)), priceKey: assetPriceKey(chainId) }, ...tokens.flat()];
 }

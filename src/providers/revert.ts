@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { EvmChainId, LpPosition, Protocol } from '../types.js';
+import type { EvmChainId, Leg, LpPosition, Protocol, WalletActivity } from '../types.js';
 import { annualize } from '../positions-math.js';
 import { finite, getJson } from './http.js';
 
@@ -16,6 +16,8 @@ const number = z.unknown().transform(finite);
 const usdPrice = z.object({ usd: number }).partial().optional();
 const cashFlowSchema = z.object({
   type: z.string(), timestamp: number, price: number, amount0: number, amount1: number, amount_usd: number,
+  /** Gas flows: the fee in the native coin, negative. */
+  amount: number, tx_hash: z.string().optional(),
   prices: z.object({ token0: usdPrice, token1: usdPrice }).partial().optional(),
 });
 const tokenSchema = z.object({ symbol: z.string().optional(), decimals: number, price: number });
@@ -63,6 +65,42 @@ export class RevertClient {
     return lists.flat().flatMap(([protocol, row]) => {
       const chainId = networks[row.network.toLowerCase()];
       return chainId !== undefined && chains.includes(chainId) ? [this.toPosition(row, protocol, chainId, address)] : [];
+    });
+  }
+
+  /**
+   * Liquidity activity for wallet history: one entry per transaction of each position (adds, removes, fee collects),
+   * with token amounts valued at the time and the gas the wallet paid. Withdrawing and collecting in one transaction
+   * is one "remove-liquidity" entry carrying the fees separately.
+   */
+  async activity(address: string, chains: readonly EvmChainId[]): Promise<WalletActivity[]> {
+    const lists = await Promise.all((Object.keys(exchanges) as Protocol[]).map(async (protocol) => (await this.pages(address, protocol)).map((row) => [protocol, row] as const)));
+    return lists.flat().flatMap(([protocol, row]) => {
+      const chainId = networks[row.network.toLowerCase()];
+      if (chainId === undefined || !chains.includes(chainId)) return [];
+      const symbol = (token: string) => (row.tokens[token] ?? row.tokens[token.toLowerCase()])?.symbol ?? `${token.slice(0, 6)}…`;
+      const pool = `${symbol(row.token0)}/${symbol(row.token1)}${row.fee_tier !== undefined ? ` ${row.fee_tier / 10_000}%` : ''} ${protocol}`;
+      const flows = row.cash_flows.flatMap((flow) => { const parsed = cashFlowSchema.safeParse(flow); return parsed.success && parsed.data.tx_hash ? [parsed.data] : []; });
+      const legs = (flow: (typeof flows)[number]): Leg[] => ([[row.token0, flow.amount0, flow.prices?.token0?.usd], [row.token1, flow.amount1, flow.prices?.token1?.usd]] as const)
+        .filter(([, amount]) => amount !== undefined && amount !== 0)
+        .map(([token, amount, price]) => ({ symbol: symbol(token), address: token.toLowerCase(), amount: Math.abs(amount!), valueUsd: price === undefined ? undefined : Math.abs(amount!) * price }));
+      const byHash = new Map<string, typeof flows>();
+      for (const flow of flows) byHash.set(flow.tx_hash!, [...(byHash.get(flow.tx_hash!) ?? []), flow]);
+      return [...byHash].flatMap(([hash, group]): WalletActivity[] => {
+        const of = (type: string) => group.filter((flow) => flow.type === type).flatMap(legs);
+        const [deposits, withdrawals, fees] = [of('deposits'), of('withdrawals'), of('claimed-fees')];
+        const gas = group.filter((flow) => flow.type === 'gas-costs');
+        const kind = deposits.length ? 'add-liquidity' : withdrawals.length ? 'remove-liquidity' : fees.length ? 'collect-fees' : undefined;
+        if (!kind) return [];
+        const timestamp = Math.max(...group.map((flow) => flow.timestamp ?? 0));
+        return [{
+          chainId, hash, timestamp: new Date(timestamp * 1000).toISOString(), kind, positionId: row.nft_id, pool,
+          sent: deposits, received: kind === 'collect-fees' ? fees : withdrawals, fees: kind === 'remove-liquidity' && fees.length ? fees : undefined,
+          gasNative: gas.length ? gas.reduce((total, flow) => total + Math.abs(flow.amount ?? 0), 0) : undefined,
+          gasUsd: gas.length ? gas.reduce((total, flow) => total + Math.abs(flow.amount_usd ?? 0), 0) : undefined,
+          source: 'revert',
+        }];
+      });
     });
   }
 

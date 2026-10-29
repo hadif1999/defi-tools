@@ -159,6 +159,7 @@ defi-tool wallet add 0xYourWallet --chain eth                 # saved as wallet0
 defi-tool wallet add 0xYourWallet --chain base --name my-wallet1
 defi-tool wallet add YourSolanaAddress --chain sol --name phantom
 defi-tool wallet list                                         # table with balances; --no-balance, --json
+defi-tool wallet history ledger1                               # latest transactions (see Wallet history)
 defi-tool wallet edit my-wallet1 --name base-main             # rename; --chain moves it to another network
 defi-tool wallet delete base-main                             # alias: wallet rm
 defi-tool positions list --wallet wallet0,base-main            # see Your positions
@@ -171,13 +172,43 @@ defi-tool positions list --wallet wallet0,base-main            # see Your positi
 - `positions list --wallet` takes saved names, each read on its saved network (`--wallet-addr` takes addresses). `positions analyze` and `alerts` accept saved names or addresses in `--wallet`. A saved wallet is checked on its own network unless `--chain` is given; an address uses `--chain` or the networks saved by `init`. Without `--wallet`, every saved wallet is checked, plus any addresses saved by `init` or `DEFI_TOOL_WALLETS`. Solana wallets are skipped with a note, because positions are Uniswap NFTs on EVM networks.
 - Wallets live in the SQLite database (`wallets` table), next to the cache: `~/.local/share/defi-tool/state.db` or `DEFI_TOOL_DB_PATH`. Only public addresses are stored.
 
+## Wallet history
+
+`wallet history` lists a wallet's latest transactions as a table: swaps, liquidity adds and removes, fee collects, sends, receives, and wraps. Each row shows what moved, its USD value when it happened, and the gas paid.
+
+```bash
+defi-tool wallet history ledger1                             # the saved wallet's network, last 30 days
+defi-tool wallet history ledger1 --chain base,arb --days 90
+defi-tool wallet history ledger1 --type swap --top 20
+defi-tool wallet history 0xYourWallet --type lp --json       # an address: every network unless --chain
+```
+
+```text
+Wallet history · ledger1 (0x902e…3f00) on all networks · last 60 days
+Source: Revert Finance · 2026-10-29 11:32 UTC
+10 transactions: 4 add liquidity, 4 remove liquidity, 2 collect fees
+added $346.00 · removed $325.73 · fees collected $5.19 · gas $2.60
+
+ #  Time (UTC)        Chain     Type              Details                                                     Value    Gas  Tx
+ 1  2026-10-29 07:27  Arbitrum  Remove liquidity  WETH/USDC 0.05% v3 #5723933 → 0.03233 WETH                 $74.54  $0.01  0x8e6d…0b8e
+ 2  2026-10-29 07:26  Arbitrum  Collect fees      WETH/USDC 0.05% v3 #5723933 → 0.000003721 WETH + 0.0078 USDC  $0.02  $0.01  0xc081…05de
+```
+
+- **Sources:** liquidity activity (Uniswap v3/v4 adds, removes and fee collects, with exact amounts and prices) comes from Revert Finance, without a key. Swaps, sends, receives and wraps come from Alchemy's Transfers API, which needs a **free key**: `export ALCHEMY_API_KEY=...` from https://dashboard.alchemy.com, or `alchemyApiKey` in the configuration file. No key-free service lists history on Base or Arbitrum: public RPCs limit log searches to hours of blocks. Without a key, the command shows liquidity activity and says so. Alchemy covers Ethereum, Optimism, BNB Chain, Polygon, Base and Arbitrum. The key is sent only to Alchemy.
+- **One row per transaction.** Transfers in one transaction are grouped and classified. Sending one token and receiving another is a **swap**. ETH ⇄ WETH is a **wrap** or **unwrap**. One direction only is a **send** or **receive**, showing the other address. A liquidity transaction found by both sources is taken from Revert.
+- **Values** are USD at the time of each transaction, from DefiLlama's historical prices (closest within 6 hours). Swaps also show received minus sent, e.g. `(-$0.08)`: what the trade cost in price impact, pool fees and MEV. The summary adds up swap volume and cost, liquidity added and removed, fees collected, and gas for the rows shown.
+- **Gas** counts only transactions this wallet sent, from receipts. It includes the L1 data fee on rollups.
+- **Spam:** receipts of tokens that are neither well known nor priced by DefiLlama are likely unsolicited airdrops. They are hidden and counted; `--all` shows them.
+- **Options:** `--chain` (default: the saved wallet's network; every EVM network for a plain address), `--days` 1–365 (default 30), `--type` with `swap`, `add-liquidity`, `remove-liquidity`, `collect-fees`, `send`, `receive`, `wrap`, `unwrap`, `other`, or `lp` for all three liquidity kinds, `--top` 1–500 (default 50), `--json` (full hashes and explorer links). Alias: `wallet tx`.
+- **Not listed:** approvals and other transactions that moved no tokens, NFT transfers, and Solana wallets.
+
 ## Configuration
 
 `init` guides terminal users through chains, wallets, and optional RPC URLs; it does not ask for an API key. `defi-tool wallet add` is the easier way to save wallets: by name and network, editable later. Non-interactive callers can supply flags; remaining settings use defaults. Use real `0x` wallet addresses with 40 hexadecimal characters.
 
 Configuration is stored in `~/.config/defi-tool/config.json` with mode `0600`; the default SQLite database is `~/.local/share/defi-tool/state.db`. Installations from before the rename used `~/.config/uniswap-tools/` and `~/.local/share/uniswap-tools/`; move those folders to the new names to keep your settings and cache. Rerunning `init` requires `--force` to replace existing settings. To keep existing settings, edit the file directly.
 
-Use `--config /path/config.json` or `DEFI_TOOL_CONFIG` to choose a different configuration. Environment overrides include `DEFI_TOOL_DB_PATH` and `DEFI_TOOL_WALLETS` (comma-separated addresses). These were `UNISWAP_CONFIG`, `UNISWAP_DB_PATH` and `UNISWAP_WALLETS` before the rename; `UNISWAP_API_URL` and `UNISWAP_API_KEY` keep their names because they configure the Uniswap GraphQL provider.
+Use `--config /path/config.json` or `DEFI_TOOL_CONFIG` to choose a different configuration. Environment overrides include `DEFI_TOOL_DB_PATH`, `DEFI_TOOL_WALLETS` (comma-separated addresses) and `ALCHEMY_API_KEY` (for `wallet history`). These were `UNISWAP_CONFIG`, `UNISWAP_DB_PATH` and `UNISWAP_WALLETS` before the rename; `UNISWAP_API_URL` and `UNISWAP_API_KEY` keep their names because they configure the Uniswap GraphQL provider.
 
 RPC environment variables use network names:
 
@@ -216,4 +247,4 @@ npm run build
 npm run dev -- positions --help
 ```
 
-Run everything with `npm test`. `DEFI_TOOL_DEXSCREENER_URL`, `DEFI_TOOL_REVERT_URL` and `DEFI_TOOL_PRICES_URL` point DexScreener, Revert Finance and DefiLlama price lookups at test servers. Targeted provider checks: `node --import tsx --test tests/defillama-pools.test.ts tests/public-pools.test.ts tests/output.test.ts tests/rpc-positions.test.ts tests/analytics.test.ts tests/storage.test.ts`. CLI checks: `node --import tsx --test tests/config.test.ts tests/cli.test.ts tests/install.test.ts`. The project uses built-in `node:sqlite`, avoiding a native SQLite addon.
+Run everything with `npm test`. `DEFI_TOOL_DEXSCREENER_URL`, `DEFI_TOOL_REVERT_URL`, `DEFI_TOOL_PRICES_URL` and `DEFI_TOOL_ALCHEMY_URL` point DexScreener, Revert Finance and DefiLlama price lookups at test servers. Targeted provider checks: `node --import tsx --test tests/defillama-pools.test.ts tests/public-pools.test.ts tests/output.test.ts tests/rpc-positions.test.ts tests/analytics.test.ts tests/storage.test.ts`. CLI checks: `node --import tsx --test tests/config.test.ts tests/cli.test.ts tests/install.test.ts`. The project uses built-in `node:sqlite`, avoiding a native SQLite addon.

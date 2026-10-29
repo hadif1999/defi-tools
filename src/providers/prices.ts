@@ -55,3 +55,37 @@ export async function coinPrices(keys: string[], options: { endpoint?: string; f
   }
   return prices;
 }
+
+const NATIVE_PRICE_KEYS: Record<EvmChainId, string> = { 1: 'coingecko:ethereum', 10: 'coingecko:ethereum', 56: 'coingecko:binancecoin', 137: 'coingecko:polygon-ecosystem-token', 4663: 'coingecko:ethereum', 8453: 'coingecko:ethereum', 42161: 'coingecko:ethereum' };
+/** DefiLlama's key for a network's native coin, or for a token when an address is given. */
+export const assetPriceKey = (chainId: EvmChainId, address?: string): string => address ? priceKey(chainId, address) : NATIVE_PRICE_KEYS[chainId];
+
+/**
+ * USD prices at given times, keyed "key@timestamp" (key lowercase, timestamp in seconds), from DefiLlama's batch
+ * historical endpoint: the closest price within 6 hours of each time. Requests are split to keep URLs short.
+ */
+export async function historicalPrices(requests: Array<{ key: string; timestamp: number }>, options: { endpoint?: string; fetcher?: typeof fetch } = {}): Promise<Map<string, number>> {
+  const byKey = new Map<string, Set<number>>();
+  for (const { key, timestamp } of requests) byKey.set(key.toLowerCase(), (byKey.get(key.toLowerCase()) ?? new Set()).add(timestamp));
+  const prices = new Map<string, number>();
+  const entries = [...byKey];
+  for (let start = 0; start < entries.length;) {
+    // About 60 key/time pairs per request.
+    const chunk: Array<[string, number[]]> = [];
+    let size = 0;
+    while (start < entries.length && (size === 0 || size + entries[start]![1].size <= 60)) { const [key, times] = entries[start++]!; chunk.push([key, [...times]]); size += times.size; }
+    const coins = encodeURIComponent(JSON.stringify(Object.fromEntries(chunk)));
+    const url = `${(options.endpoint ?? PRICES_URL).replace(/\/$/, '')}/batchHistorical?coins=${coins}&searchWidth=6h`;
+    const body = await getJson(options.fetcher ?? fetch, url, 'DefiLlama prices', 20_000) as { coins?: Record<string, { prices?: Array<{ timestamp?: unknown; price?: unknown }> }> } | null;
+    for (const [key, times] of chunk) {
+      const points = (body?.coins?.[key] ?? Object.entries(body?.coins ?? {}).find(([name]) => name.toLowerCase() === key)?.[1])?.prices ?? [];
+      const valid = points.flatMap((point) => typeof point.timestamp === 'number' && positive(point.price) !== undefined ? [{ timestamp: point.timestamp, price: positive(point.price)! }] : []);
+      // Each requested time takes the closest returned point.
+      for (const time of times) {
+        const closest = valid.reduce<{ timestamp: number; price: number } | undefined>((best, point) => !best || Math.abs(point.timestamp - time) < Math.abs(best.timestamp - time) ? point : best, undefined);
+        if (closest && Math.abs(closest.timestamp - time) <= 6 * 3600) prices.set(`${key}@${time}`, closest.price);
+      }
+    }
+  }
+  return prices;
+}
