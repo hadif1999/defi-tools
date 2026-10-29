@@ -30,6 +30,7 @@ defi-tool positions list --help
 defi-tool positions create --help
 defi-tool alerts check --help
 defi-tool dex-data download --help
+defi-tool dex-data show --help
 defi-tool market-data download --help
 defi-tool dex-ticker --help
 defi-tool init --help
@@ -236,6 +237,45 @@ WETH/USDC: dex-data/WETH-USDC_base_uniswap-v3-0.05_0xd0b53d_15m_20261009-1200_20
 - **Gaps:** GeckoTerminal sends no candle for a period without trades. `--fill forward` (default) adds one at the previous close with zero volume and `filled=true`, since a pool's price cannot move without a trade; `--fill none` leaves them out. Periods before the first trade in the range are never filled; the summary says when the data starts late.
 - **Files:** `--format csv` (default), `json` (metadata and candles in one document), `jsonl` (one candle per line) or `parquet` (`time` as a timestamp, prices and volume as doubles, `filled` as a boolean). Columns: `time` (ISO 8601 UTC), `timestamp` (unix seconds), `open`, `high`, `low`, `close`, `volume`, `filled`. Files go to `--out-dir` (default `./dex-data`), named by pair, network, exchange, version, fee, pool address prefix, timeframe and range. Each file except JSON gets a `.meta.json` beside it with the pool, tokens, units, range, request count and every check above (Parquet also carries it in its footer). Existing files are kept unless `--force`.
 - `--json` prints the summary as JSON. A pair that fails is reported on stderr while the others continue; the exit code is `1` only when every pair fails.
+
+### Charts: `dex-data show`
+
+`dex-data show` charts a pool's candles together with its live ticker: as a candlestick chart in the terminal (default), or as an interactive page in your browser (`--output html`).
+
+```bash
+defi-tool dex-data show WETH/USDC --chain base                              # all time, 1h candles, in the terminal
+defi-tool dex-data show WETH/USDC --chain base --fee 0.05 --timeframe 15m --from 3d
+defi-tool dex-data show WETH/USDC --chain base --output html                # opens in your browser
+defi-tool dex-data show cbBTC/USDC --chain base --timeframe 1d --output html --html-file ./cbbtc.html --no-open
+defi-tool dex-data show WETH/USDC --chain base --offline                    # cached data only, no network
+defi-tool dex-data show --pool 0xd0b53d9277642d899df5c87a3966a349a798f224 --chain base --timeframe 4h --json
+```
+
+```text
+WETH/USDC  2,337.22 USDC per WETH  24h -1.12%  H 2,390.19  L 2,291.41  Vol $12.9M  Liq $8.3M  Uniswap v3 0.05% on Base
+WETH/USDC  Uniswap v3 0.05% · Base · 0xd0b5…f224 · USDC per WETH
+1h candles · 2026-10-26 20:00 – 2026-10-29 19:00 UTC
+
+                           ╷       │╷    ╷││ ╷    ┃ ╿┃ ╽        │ ┃┃ ╽╻╷ │                    ┃┃    │
+                           │ │ │   ││  ╷ │╽╽ ╽╷ ╷╽┃ ╵│ ╿┃       ╽ ┃╿ ╿╿╿ ┃╷                   ┃┃ ╷│ ┤ 2,357.87
+      │               │ │  ┃╿╹ ╿╿ ┃┃│ ╵╿ ╿    │ │       ┃│ │╷ ╷┃╿         ┃     │           ┃ ╹  ┃│ ┤ 2,341.76
+┈┈┈┈┈┈││┈┈┈┈┈┈┈┈┈┈┈┈┈╷┃┈┃╽┈┃┈┈┈┈┈┈┈╵┈┈┈┈┈┈┈┈┈┈┈┈╵┈┈┈┈┈┈┈╿┃┈╽╽┈╽┃┈┈┈┈┈┈┈┈┈┈┃┈┈┈┈┈│┈┈┈┈╷┈┈╷┃┈┈┈┈╿┃ ◀ 2,337.22
+ ╷  ╻ ╽╽│  ╷ ╷   │  ╷│┃ ┃┃ ╵                             │ │╵ ││          ┃  │╷ ╽╽ │││ ┃┃ ╽╽┃     ╿ ┤ 2,325.65
+───────────────────────────────────────────────────────────────────────────────────────────────── ┤ volume
+▄▄ ▃▄ ▃▆▄ ▃▂ ▄▃▅ ▄▃ ▇▃▆ ██ █▄▄ ▃▃ ▂▆▃ ▂▂ ▄▄▂ ▂▁ ▁▁█ ▂▂ ▃█▇ ▇▃ ▅▅█ ██ ▅▄▂ ▂█ █▄▃ ▄▃ ▃▅▃ ▃▂ ▅██ ██ █▇
+10-26 20:00   10-27 06:00   10-27 16:00   10-28 02:00   10-28 12:00   10-28 22:00   10-29 08:00
+
+Change +0.59%   High 2,392.11 2026-10-28 09:00   Low 2,291.41 2026-10-29 02:00   Volume 34.7M USDC   Volatility 41%/yr   Candles 71
+Data: 1 cached file · GeckoTerminal
+```
+
+- **Cache first:** `show` reads the files `dex-data download` saved in `--data-dir` (default `./dex-data`) for the same pool and price unit, whatever their format. Files at the requested `--timeframe` are used as they are; finer ones whose size divides it are combined into it (15m files make a 1h chart), keeping only whole periods. Where files overlap, the most recent download wins, and real candles beat filled ones.
+- **Then download:** stretches the cache does not cover, within GeckoTerminal's 180 days, are downloaded and saved to the cache as ordinary `dex-data download` files (CSV with `.meta.json`), so the next `show` is instant and history older than 180 days stays viewable after GeckoTerminal drops it. `--refresh` downloads the available range again; `--offline` uses only the cache and finds the pool among cached files (also the fallback when GeckoTerminal cannot be reached). Ranges no source has are named under the chart.
+- **Range:** without `--from`, `show` covers all time: everything cached for the pool plus GeckoTerminal's 180 days. `--from`/`--to` take the same forms as `download`; only finished periods are shown. Pool choice (`--chain`, `--dex`, `--protocol`, `--fee`, `--pool`) and `--quote` work as in `download`.
+- **Live ticker:** the `dex-ticker` line (price, 24h change, high, low, volume, liquidity) heads the view, and the live price is drawn across the chart (a dotted line marked `◀` on the axis; a dashed `live` line in HTML). When it cannot be read, the view says why and still shows the chart.
+- **Terminal (`--output terminal`, default):** a candlestick chart sized to your terminal (`--width`, `--height` to override): each row holds two price levels, bodies are heavy lines and wicks light ones, green rose, red fell, grey had no trades; volume bars below (`--no-volume` to hide), a price axis, and time labels. Long ranges merge consecutive candles per column, and the header says how many; short ones spread out over the width. Below it: change over the range, high and low with their times, volume, annualized volatility (from close-to-close returns), the candle count with quiet periods, and where the data came from. Colors follow `--no-color`, `NO_COLOR` and whether the output is a terminal.
+- **HTML (`--output html`):** one self-contained file (the [TradingView Lightweight Charts](https://github.com/tradingview/lightweight-charts) library is embedded, so it works offline and can be shared), saved to `--html-file` (default `<data-dir>/charts/<pair>_<chain>_<pool>_<timeframe>.html`) and opened in your default browser unless `--no-open`. It has zoom and pan, a crosshair legend with OHLC, change and volume, a volume pane, the live price line, buttons for every larger timeframe (built in the page from the loaded candles) and for the visible range (1D, 1W, 1M, 3M, All), figures that follow the chosen timeframe, and light and dark themes that follow your system or a toggle.
+- `--json` prints the pool, price unit, range, figures, live ticker, sources and every candle.
 
 ## Market data
 

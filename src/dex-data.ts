@@ -249,3 +249,25 @@ const COLUMNS: CandleColumn<Candle>[] = [...(['open', 'high', 'low', 'close', 'v
 export function writeDataset(directory: string, fileName: string, candles: Candle[], dataset: DexDataset, format: CandleFormat, force: boolean): Promise<string[]> {
   return writeRows(directory, fileName, candles, COLUMNS, dataset, format, force);
 }
+
+export type DatasetHeader = Omit<DexDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'>;
+
+/** What a download's metadata says before any candle is fetched: the pool, units, timeframe and range. */
+export function datasetHeader(pool: GeckoPool, unit: ReturnType<typeof priceUnit>, pair: string, timeframe: Timeframe, start: number, end: number, fill: FillMode): DatasetHeader {
+  return {
+    source: 'geckoterminal',
+    pool: { chain: CHAINS[pool.chainId].slug, chainId: pool.chainId, dex: pool.dex, dexId: pool.dexId, version: pool.version, address: pool.address, name: pool.name, feeTier: pool.feeTier, tvlUsd: pool.tvlUsd, createdAt: pool.createdAt },
+    pair, priceUnit: unit.label, pricedToken: unit.priced, quoteToken: unit.quote, volumeUnit: unit.quote?.symbol ?? 'USD',
+    timeframe, from: isoTime(start), to: isoTime(end), fill,
+  };
+}
+
+/** Download [start, end) for a pool, check it, and save it with its metadata. Returns the dataset, the candles and the paths written. */
+export async function downloadDataset(client: GeckoTerminalClient, pool: GeckoPool, unit: ReturnType<typeof priceUnit>, header: DatasetHeader, start: number, end: number,
+  save: { directory: string; format: CandleFormat; force: boolean }, onPage?: (pages: number, oldest: number) => void): Promise<{ dataset: DexDataset; candles: Candle[]; files: string[] }> {
+  const { raw, requests } = await downloadCandles(client, pool, header.timeframe, start, end, { token: unit.priced.address, currency: unit.currency }, onPage);
+  const { candles, validation } = cleanCandles(raw, header.timeframe, start, end, header.fill);
+  const dataset: DexDataset = { ...header, downloadedAt: new Date().toISOString(), requests, candles: candles.length, validation };
+  const files = await writeDataset(save.directory, datasetFileName(header, start, end, save.format), candles, dataset, save.format, save.force);
+  return { dataset, candles, files };
+}
