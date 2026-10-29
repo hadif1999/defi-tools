@@ -7,6 +7,7 @@ import type { CreatePlan, PlanTransaction } from './create-position.js';
 import { CHAINS, type SavedWallet } from './types.js';
 import type { GeckoPool } from './providers/geckoterminal.js';
 import type { DexDataset } from './dex-data.js';
+import { MARKET_TIMEFRAMES, SAMPLE_PERIODS, type MarketDataset } from './market-data.js';
 
 const MISSING = '—';
 
@@ -450,6 +451,64 @@ export function printDexDownloads(results: DexDownload[], options: { json: boole
         if (validation.missing && result.dataset!.fill === 'none') console.log(`  ${formatCount(validation.missing)} periods without trades are left out (--fill none).`);
       }
       if (result.alternatives.length) console.log(`  Other pools: ${result.alternatives.map((pool) => `${geckoPoolLabel(pool)} on ${CHAINS[pool.chainId].name} (${formatUsd(pool.tvlUsd)}, ${pool.address.slice(0, 10)}…)`).join('; ')}. Pick one with --fee, --protocol or --pool.`);
+    }
+  }
+  for (const result of results.filter((item) => item.error)) console.error(`${result.label}: ${result.error}`);
+}
+
+/** One coin or pair of a market-data download: what was used, and what was written or went wrong. */
+export interface MarketDownload {
+  label: string;
+  dataset?: Omit<MarketDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'> & Partial<MarketDataset>;
+  plannedRequests?: number;
+  files?: string[];
+  error?: string;
+}
+
+/** The market-data summary: one row per pair with the coins found, candle counts and checks, then files and notes. */
+export function printMarketDownloads(results: MarketDownload[], options: { json: boolean; dryRun: boolean; timeframe: string; from: number; to: number }): void {
+  if (options.json) {
+    console.log(JSON.stringify({ data: results.map((result) => ({ pair: result.label, ...(result.dataset ?? {}), plannedRequests: result.plannedRequests, files: result.files, error: result.error })) }, null, 2));
+    return;
+  }
+  const exact = (value: number | undefined) => value === undefined ? MISSING : value.toLocaleString('en-US');
+  const minute = (seconds: number) => new Date(seconds * 1000).toISOString().slice(0, 16).replace('T', ' ');
+  const coin = (item: { key: string; symbol: string }) => item.key === 'usd' ? 'USD' : `${item.symbol} (${item.key})`;
+  console.log(`Market data · ${options.timeframe} candles · ${minute(options.from)} – ${minute(options.to)} UTC${options.dryRun ? ' · dry run' : ''}`);
+  console.log('Source: DefiLlama blended prices (no key) · coins found on CoinGecko\n');
+  const done = results.filter((result) => result.dataset && !result.error);
+  if (done.length) {
+    const columns = [{ header: '#', align: 'right' as const }, { header: 'Pair' }, { header: 'Coin', max: 36 }, { header: 'Quote', max: 36 }, { header: 'Sample' },
+      ...(options.dryRun ? [{ header: 'Requests', align: 'right' as const }] : [{ header: 'Candles', align: 'right' as const }, { header: 'Filled', align: 'right' as const }, { header: 'Thin', align: 'right' as const }, { header: 'Jumps', align: 'right' as const }, { header: 'Confidence', align: 'right' as const }, { header: 'First candle' }])];
+    console.log(renderTable(columns, done.map((result, index) => {
+      const dataset = result.dataset!;
+      const validation = dataset.validation;
+      const scores = validation ? Object.values(validation.confidence).filter((score): score is number => score !== undefined) : [];
+      const first = !dataset.candles ? 'no data' : validation!.leadingEmpty === 0 ? 'range start' : `+${exact(validation!.leadingEmpty)} periods`;
+      return [String(index + 1), result.label, coin(dataset.base), coin(dataset.quote), dataset.sample,
+        ...(options.dryRun ? [String(result.plannedRequests)] : [exact(dataset.candles), exact(validation?.filled), exact(validation?.lowSamples), exact(validation?.jumps), scores.length ? Math.min(...scores).toFixed(2) : MISSING, first]),
+      ];
+    })));
+    console.log('');
+    for (const result of done) {
+      const dataset = result.dataset!;
+      console.log(`${result.label}: ${options.dryRun ? 'would write ' : ''}${result.files!.join(', ')}`);
+      const validation = dataset.validation;
+      if (!validation) continue;
+      const reasons = Object.entries(validation.dropped).map(([reason, count]) => `${count} ${reason}`);
+      if (validation.duplicates) reasons.push(`${validation.duplicates} duplicate samples`);
+      if (validation.unmatched) reasons.push(`${validation.unmatched} ${dataset.base.symbol} samples without a ${dataset.quote.symbol} sample at the same time`);
+      if (reasons.length) console.log(`  Left out: ${reasons.join(', ')}.`);
+      if (validation.lowSamples) console.log(`  ${exact(validation.lowSamples)} candle(s) used fewer than half the usual samples; their highs and lows are less reliable.`);
+      const perCandle = Math.round(MARKET_TIMEFRAMES[dataset.timeframe] / SAMPLE_PERIODS[dataset.sample]);
+      if (perCandle < 4) console.log(`  ${dataset.sample} samples give ${perCandle === 1 ? 'one sample per candle, so open, high, low and close are the same price' : `at most ${perCandle} samples per candle, so highs and lows are rough`}. DefiLlama keeps finer prices only for larger coins.`);
+      if (dataset.candles && validation.filled / dataset.candles > 0.25) console.log(`  ${Math.round(validation.filled / dataset.candles * 100)}% of candles are filled: DefiLlama has few prices for this coin at this spacing. Try a coarser --sample or --timeframe.`);
+      if (validation.jumps) console.log(`  ${validation.jumps} candle(s) closed more than 50% away from the previous close; check them before relying on the data.`);
+      const low = Object.entries(validation.confidence).filter(([, score]) => score !== undefined && score < 0.9);
+      if (low.length) console.log(`  DefiLlama's confidence is low for ${low.map(([symbol, score]) => `${symbol} (${score!.toFixed(2)})`).join(', ')}: few or disagreeing price sources.`);
+      if (validation.leadingEmpty && dataset.candles) console.log(`  No samples for the first ${exact(validation.leadingEmpty)} periods; the data starts at the first sample.`);
+      if (!dataset.candles) console.log('  DefiLlama has no prices for this range: the file has no candles. Try a later --from or a coarser --sample.');
+      if (validation.missing && dataset.fill === 'none') console.log(`  ${exact(validation.missing)} periods without samples are left out (--fill none).`);
     }
   }
   for (const result of results.filter((item) => item.error)) console.error(`${result.label}: ${result.error}`);

@@ -49,3 +49,15 @@ export function feeTierFromPercent(label: string): number | undefined {
   const pips = Math.round(Number(match[1]) * 10_000);
   return pips > 0 && pips < 1_000_000 ? pips : undefined;
 }
+
+/** Run a request, and again after a rate limit (HTTP 429): wait `waitMs`, then twice as long each time, up to `retries` times. */
+export async function retryRateLimit<T>(task: () => Promise<T>, waitMs: number, retries = 3): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await task();
+    } catch (error) {
+      if (!/HTTP 429/.test((error as Error).message) || attempt === retries) throw error;
+      await new Promise((resolve) => setTimeout(resolve, waitMs * 2 ** attempt));
+    }
+  }
+}

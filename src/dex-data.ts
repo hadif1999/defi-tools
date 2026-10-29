@@ -1,19 +1,10 @@
-import { existsSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { parquetWriteBuffer } from 'hyparquet-writer';
 import { CHAINS, type ChainId, type Dex, type PoolVersion } from './types.js';
 import { quoteRank } from './positions-math.js';
+import { alignRange, fileStamp, isoTime, JUMP, safeName, writeRows, type CandleColumn, type CandleFormat, type FillMode } from './candle-files.js';
 import { GECKO_TIMEFRAMES, OHLCV_PAGE, type GeckoPool, type GeckoTerminalClient, type GeckoToken, type Timeframe } from './providers/geckoterminal.js';
 
 /** GeckoTerminal's public API serves candles from the last 180 days only. */
 export const MAX_HISTORY_DAYS = 180;
-export const DEX_DATA_FORMATS = ['csv', 'json', 'jsonl', 'parquet'] as const;
-export type DexFormat = typeof DEX_DATA_FORMATS[number];
-export const FILL_MODES = ['forward', 'none'] as const;
-export type FillMode = typeof FILL_MODES[number];
-/** A close this far from the previous one (as a fraction) is reported as a jump worth checking. */
-const JUMP = 0.5;
 
 export interface Candle {
   /** Start of the candle, unix seconds (UTC). */
@@ -51,34 +42,12 @@ export interface Validation {
   complete: boolean;
 }
 
-/** Parse a time: now, a duration ago (30d, 12h, 2w), a date (2026-10-01), a date and time (2026-10-01T12:00Z), or unix seconds. */
-export function parseTime(value: string, optionName: string, now = Date.now()): number {
-  const text = value.trim().toLowerCase();
-  if (text === 'now') return Math.floor(now / 1000);
-  const ago = /^(\d+(?:\.\d+)?)\s*(h|d|w)$/.exec(text);
-  if (ago) return Math.floor(now / 1000 - Number(ago[1]) * { h: 3_600, d: 86_400, w: 604_800 }[ago[2] as 'h' | 'd' | 'w']);
-  if (/^\d{9,10}$/.test(text)) return Number(text);
-  if (/^\d{4}-\d{2}-\d{2}([t ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(z|[+-]\d{2}:?\d{2})?)?$/.test(text)) {
-    // Dates and times without a zone are UTC, like the timestamps in the files.
-    const iso = text.replace(' ', 't').toUpperCase();
-    const ms = Date.parse(/T/.test(iso) && !/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? `${iso}Z` : iso);
-    if (Number.isFinite(ms)) return Math.floor(ms / 1000);
-  }
-  throw new Error(`${optionName} "${value}" is not a time. Use now, a duration ago (30d, 12h, 2w), a UTC date (2026-10-01), a date and time (2026-10-01T12:00), or unix seconds.`);
-}
-
-/** The candle periods to download: [from, to) aligned to the timeframe, and whether the newest period is still open. */
+/** The candle periods to download: [from, to) aligned to the timeframe, within GeckoTerminal's 180 days. */
 export function candleRange(timeframe: Timeframe, from: number, to: number, now: number, includePartial: boolean): { start: number; end: number } {
-  const step = GECKO_TIMEFRAMES[timeframe].seconds;
-  if (from >= to) throw new Error('--from must be earlier than --to.');
-  const oldest = now - MAX_HISTORY_DAYS * 86_400;
-  if (from < oldest - 60) throw new Error(`GeckoTerminal's free API serves only the last ${MAX_HISTORY_DAYS} days; --from is ${Math.ceil((now - from) / 86_400)} days ago. Use --from ${MAX_HISTORY_DAYS}d or later.`);
-  // A period counts when it starts inside the range; without --include-partial, only periods that have ended.
-  const start = Math.ceil(Math.max(from, oldest) / step) * step;
-  const last = includePartial ? to : Math.min(to, now - step + 1);
-  const end = Math.ceil(last / step) * step;
-  if (end <= start) throw new Error(`No complete ${timeframe} candle fits between --from and --to. Widen the range${includePartial ? '' : ' or add --include-partial'}.`);
-  return { start, end };
+  return alignRange(GECKO_TIMEFRAMES[timeframe].seconds, timeframe, from, to, now, includePartial, {
+    oldest: now - MAX_HISTORY_DAYS * 86_400,
+    tooOld: `GeckoTerminal's free API serves only the last ${MAX_HISTORY_DAYS} days; --from is ${Math.ceil((now - from) / 86_400)} days ago. Use --from ${MAX_HISTORY_DAYS}d or later.`,
+  });
 }
 
 /**
@@ -242,47 +211,19 @@ export interface DexDataset {
   validation: Validation;
 }
 
-export const isoTime = (seconds: number) => new Date(seconds * 1000).toISOString().replace('.000Z', 'Z');
-const stamp = (seconds: number) => isoTime(seconds).slice(0, 16).replace(/[-:]/g, '').replace('T', '-');
-const safe = (text: string) => text.replace(/[^A-Za-z0-9.]+/g, '').slice(0, 20) || 'token';
 
 /** A file name that says what is inside: WETH-USDC_base_uniswap-v3-0.05_1h_20260929-0000_20261029-0000.csv */
-export function datasetFileName(dataset: Omit<DexDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'>, start: number, end: number, format: DexFormat): string {
+export function datasetFileName(dataset: Omit<DexDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'>, start: number, end: number, format: CandleFormat): string {
   const { pool } = dataset;
   const quote = dataset.quoteToken?.symbol ?? 'USD';
-  const kind = [pool.dex ?? safe(pool.dexId), pool.version, pool.feeTier === undefined ? undefined : String(pool.feeTier / 10_000)].filter(Boolean).join('-');
+  const kind = [pool.dex ?? safeName(pool.dexId), pool.version, pool.feeTier === undefined ? undefined : String(pool.feeTier / 10_000)].filter(Boolean).join('-');
   // Several pools can share a pair and tier (v4 hooks, Aerodrome deployments); the address prefix keeps them apart.
-  return `${safe(dataset.pricedToken.symbol)}-${safe(quote)}_${CHAINS[pool.chainId].slug}_${kind}_${pool.address.slice(0, 8)}_${dataset.timeframe}_${stamp(start)}_${stamp(end)}.${format}`;
+  return `${safeName(dataset.pricedToken.symbol)}-${safeName(quote)}_${CHAINS[pool.chainId].slug}_${kind}_${pool.address.slice(0, 8)}_${dataset.timeframe}_${fileStamp(start)}_${fileStamp(end)}.${format}`;
 }
 
-const COLUMNS = ['time', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'filled'] as const;
-const row = (candle: Candle) => ({ time: isoTime(candle.timestamp), ...candle });
+const COLUMNS: CandleColumn<Candle>[] = [...(['open', 'high', 'low', 'close', 'volume'] as const).map((name) => ({ name, type: 'DOUBLE' as const })), { name: 'filled', type: 'BOOLEAN' }];
 
-/** Encode candles in a format. JSON holds the metadata too; other formats get it in a .meta.json file beside them (Parquet also in its footer). */
-export function encodeCandles(candles: Candle[], dataset: DexDataset, format: DexFormat): Uint8Array | string {
-  if (format === 'csv') return `${COLUMNS.join(',')}\n${candles.map((candle) => COLUMNS.map((column) => String(row(candle)[column])).join(',')).join('\n')}${candles.length ? '\n' : ''}`;
-  if (format === 'jsonl') return candles.map((candle) => JSON.stringify(row(candle))).join('\n') + (candles.length ? '\n' : '');
-  if (format === 'json') return `${JSON.stringify({ meta: dataset, candles: candles.map(row) }, null, 2)}\n`;
-  return new Uint8Array(parquetWriteBuffer({
-    columnData: [
-      { name: 'time', data: candles.map((candle) => new Date(candle.timestamp * 1000)), type: 'TIMESTAMP' },
-      { name: 'timestamp', data: candles.map((candle) => BigInt(candle.timestamp)), type: 'INT64' },
-      ...(['open', 'high', 'low', 'close', 'volume'] as const).map((name) => ({ name, data: candles.map((candle) => candle[name]), type: 'DOUBLE' as const })),
-      { name: 'filled', data: candles.map((candle) => candle.filled), type: 'BOOLEAN' },
-    ],
-    kvMetadata: [{ key: 'defi-tool', value: JSON.stringify(dataset) }],
-  }));
-}
-
-/** Write the data file (and, except for JSON, its .meta.json); refuses to replace files unless `force`. Returns the paths written. */
-export async function writeDataset(directory: string, fileName: string, candles: Candle[], dataset: DexDataset, format: DexFormat, force: boolean): Promise<string[]> {
-  const path = join(directory, fileName);
-  const metaPath = `${path}.meta.json`;
-  const paths = format === 'json' ? [path] : [path, metaPath];
-  const existing = paths.find((item) => existsSync(item));
-  if (existing && !force) throw new Error(`${existing} already exists. Add --force to replace it, or choose another --out-dir.`);
-  await mkdir(directory, { recursive: true });
-  await writeFile(path, encodeCandles(candles, dataset, format));
-  if (format !== 'json') await writeFile(metaPath, `${JSON.stringify(dataset, null, 2)}\n`);
-  return paths;
+/** Write candles (and, except for JSON, a .meta.json); refuses to replace files unless `force`. Returns the paths written. */
+export function writeDataset(directory: string, fileName: string, candles: Candle[], dataset: DexDataset, format: CandleFormat, force: boolean): Promise<string[]> {
+  return writeRows(directory, fileName, candles, COLUMNS, dataset, format, force);
 }

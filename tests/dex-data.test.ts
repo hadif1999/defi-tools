@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects } from 'hyparquet';
 import { classifyDex, GeckoTerminalClient, type GeckoPool } from '../src/providers/geckoterminal.js';
-import { candleRange, cleanCandles, datasetFileName, downloadCandles, findPools, parseTime, priceUnit, writeDataset, type DexDataset } from '../src/dex-data.js';
+import { candleRange, cleanCandles, datasetFileName, downloadCandles, findPools, priceUnit, writeDataset, type DexDataset } from '../src/dex-data.js';
+import { parseTime } from '../src/candle-files.js';
 
 const H = 3_600;
 const NOW = 1_793_275_000; // 2026-10-29 11:56:40 UTC

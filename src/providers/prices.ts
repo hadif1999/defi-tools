@@ -1,5 +1,5 @@
 import type { EvmChainId } from '../types.js';
-import { getJson, positive } from './http.js';
+import { getJson, positive, retryRateLimit } from './http.js';
 
 // DefiLlama's public coins API (no key): current USD prices by chain:address. https://defillama.com/docs/api
 export const PRICES_URL = 'https://coins.llama.fi';
@@ -88,4 +88,35 @@ export async function historicalPrices(requests: Array<{ key: string; timestamp:
     }
   }
   return prices;
+}
+
+/** The most points one chart request may ask for, across all its coins (two coins get 250 each). */
+export const CHART_POINTS = 500;
+
+export interface ChartSeries { symbol?: string; confidence?: number; prices: unknown[] }
+
+/**
+ * Price samples for DefiLlama coin keys ("coingecko:ethereum", "base:0x…"): `span` points `period` apart from `start`
+ * (unix seconds), keyed lowercase. Coins without data in the window are absent. Points are returned unchecked.
+ */
+export async function priceChart(keys: string[], start: number, span: number, period: string, options: { endpoint?: string; fetcher?: typeof fetch; rateLimitWaitMs?: number } = {}): Promise<Map<string, ChartSeries>> {
+  if (span < 1 || span * keys.length > CHART_POINTS) throw new Error(`DefiLlama charts take at most ${CHART_POINTS} points per request across all coins.`);
+  const url = `${(options.endpoint ?? PRICES_URL).replace(/\/$/, '')}/chart/${keys.join(',')}?start=${start}&span=${span}&period=${period}`;
+  const body = await retryRateLimit(() => getJson(options.fetcher ?? fetch, url, 'DefiLlama prices', 30_000), options.rateLimitWaitMs ?? 10_000) as { coins?: Record<string, { symbol?: unknown; confidence?: unknown; prices?: unknown }> } | null;
+  const series = new Map<string, ChartSeries>();
+  for (const [key, coin] of Object.entries(body?.coins ?? {})) {
+    series.set(key.toLowerCase(), {
+      symbol: typeof coin?.symbol === 'string' ? coin.symbol : undefined,
+      confidence: typeof coin?.confidence === 'number' ? coin.confidence : undefined,
+      prices: Array.isArray(coin?.prices) ? coin.prices : [],
+    });
+  }
+  return series;
+}
+
+/** DefiLlama's symbol for each coin key it knows (keyed lowercase); unknown keys are absent. */
+export async function coinSymbols(keys: string[], options: { endpoint?: string; fetcher?: typeof fetch } = {}): Promise<Map<string, string>> {
+  const url = `${(options.endpoint ?? PRICES_URL).replace(/\/$/, '')}/prices/current/${keys.join(',')}`;
+  const body = await retryRateLimit(() => getJson(options.fetcher ?? fetch, url, 'DefiLlama prices', 20_000), 10_000) as { coins?: Record<string, { symbol?: unknown }> } | null;
+  return new Map(Object.entries(body?.coins ?? {}).flatMap(([key, coin]) => typeof coin?.symbol === 'string' ? [[key.toLowerCase(), coin.symbol] as [string, string]] : []));
 }

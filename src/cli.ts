@@ -14,7 +14,7 @@ import { DefiLlamaPoolsClient, defiLlamaListsChain } from './providers/defillama
 import { RpcProvider } from './providers/rpc.js';
 import { DexScreenerClient, normalizeAddress, similarTvl, type PoolDetails } from './providers/dexscreener.js';
 import { hooklessV4PoolId } from './providers/pool-address.js';
-import { poolDex, printCreatePlan, printHistory, printDexDownloads, printPoolList, printPools, printPositions, printPositionTables, printWallets, type DexDownload, type Signer } from './output.js';
+import { poolDex, printCreatePlan, printHistory, printDexDownloads, printMarketDownloads, printPoolList, printPools, printPositions, printPositionTables, printWallets, type DexDownload, type MarketDownload, type Signer } from './output.js';
 import { parseAmount, parseDeadline, parseLimit, planPosition } from './create-position.js';
 import { CREATE_CHAINS } from './providers/tokens.js';
 import { walletBalances } from './providers/balances.js';
@@ -24,18 +24,22 @@ import { RevertClient } from './providers/revert.js';
 import { loadPortfolio, splitPositions, type PositionSource, type WalletGroup } from './positions.js';
 import { GECKO_TIMEFRAMES, GeckoTerminalClient, OHLCV_PAGE, type GeckoPool, type Timeframe } from './providers/geckoterminal.js';
 import { feeTierFromPercent } from './providers/http.js';
-import { candleRange, cleanCandles, datasetFileName, downloadCandles, findPools, isoTime, parseTime, priceUnit, writeDataset, FILL_MODES, DEX_DATA_FORMATS, MAX_HISTORY_DAYS, type FillMode, type DexDataset, type DexFormat } from './dex-data.js';
+import { candleRange, cleanCandles, datasetFileName, downloadCandles, findPools, priceUnit, writeDataset, MAX_HISTORY_DAYS, type DexDataset } from './dex-data.js';
+import { autoSample, buildCandles, coverage, sampleCandidates, sampleRequests, downloadSamples, marketFileName, marketRange, parseMarketPair, resolveCoin, writeMarketData, MARKET_TIMEFRAMES, SAMPLE_PERIODS, type Coin, type MarketDataset, type MarketTimeframe, type SamplePeriod } from './market-data.js';
+import { searchCoins } from './providers/coingecko.js';
+import { coinSymbols } from './providers/prices.js';
+import { CANDLE_FORMATS, FILL_MODES, isoTime, parseTime, type CandleFormat, type FillMode } from './candle-files.js';
 import { ACTIVITY_KINDS, CHAINS, DEXES, SOLANA, type ActivityKind, POOL_SORTS, POOL_VERSIONS, isEvmChain, type AppConfig, type Dex, type EvmChainId, type PoolScore, type ChainId, type Pool, type PoolSort, type PoolVersion, type PositionAnalysis, type Protocol, type SavedWallet } from './types.js';
 
 const DEFAULT_TOP = 25;
 
 const app = new Command().name('defi-tool')
-  .description('Find Uniswap, PancakeSwap, Aerodrome, Curve and Raydium pools check the health of your Uniswap LP positions, and download pool price history. All commands are read-only.')
+  .description('Find Uniswap, PancakeSwap, Aerodrome, Curve and Raydium pools, check the health of your Uniswap LP positions, and download pool and market price history. All commands are read-only.')
   .version('0.1.0').option('--config <file>', 'use a different configuration file')
   .configureHelp({ showGlobalOptions: true }).showSuggestionAfterError(true)
   .showHelpAfterError('Run defi-tool --help, or add --help after any command for examples.');
 const configPath = (): string => app.opts().config ?? process.env.DEFI_TOOL_CONFIG ?? DEFAULT_CONFIG_PATH;
-commandHelp(app, ['defi-tool init', 'defi-tool chains', 'defi-tool pools scan --chain eth', 'defi-tool pools get WSOL/USDC', 'defi-tool wallet add 0xYourWallet --chain eth --name main', 'defi-tool positions list --wallet main', 'defi-tool dex-data download WETH/USDC --chain base'], [
+commandHelp(app, ['defi-tool init', 'defi-tool chains', 'defi-tool pools scan --chain eth', 'defi-tool pools get WSOL/USDC', 'defi-tool wallet add 0xYourWallet --chain eth --name main', 'defi-tool positions list --wallet main', 'defi-tool dex-data download WETH/USDC --chain base', 'defi-tool market-data download ETH,BTC/ETH'], [
   'No API key or setup is needed for public data. wallet add saves wallets by name; init optionally saves networks and settings.',
   'Add --help to any command, e.g. defi-tool positions analyze --help.',
   `Use --json on data commands for scripts. Chain names: ${Object.values(CHAINS).map((chain) => chain.slug).join(', ')}, all.`,
@@ -769,7 +773,7 @@ const download = dexData.command('download')
   .addOption(choiceOption('--timeframe <size>', 'candle size', Object.keys(GECKO_TIMEFRAMES)).default('1h'))
   .option('--from <time>', `start: a duration ago (30d, 12h, 2w), a UTC date (2026-10-01) or date-time (2026-10-01T12:00), or unix seconds; at most ${MAX_HISTORY_DAYS}d`, '30d')
   .option('--to <time>', 'end, in the same forms as --from', 'now')
-  .addOption(choiceOption('--format <type>', 'file format: csv, json (metadata included), jsonl (one candle per line), parquet', DEX_DATA_FORMATS).default('csv'))
+  .addOption(choiceOption('--format <type>', 'file format: csv, json (metadata included), jsonl (one candle per line), parquet', CANDLE_FORMATS).default('csv'))
   .option('--out-dir <folder>', 'folder for the files (created if needed)', 'dex-data')
   .option('--quote <token>', 'price unit: auto (stablecoin, then native coin), usd, or one of the pair\'s tokens', 'auto')
   .addOption(choiceOption('--fill <mode>', 'periods without trades: forward = previous close, zero volume, marked filled; none = leave them out', FILL_MODES).default('forward'))
@@ -794,7 +798,7 @@ commandHelp(download, [
   'Without --fee, each pair uses the deepest pool matching --dex and --protocol; the summary names the next ones.',
 ]);
 download.action(async (pairsArg: string | undefined, options: {
-  chain?: string; dex: Dex[]; protocol: PoolVersion[]; fee?: string; pool?: string; timeframe: Timeframe; from: string; to: string; format: DexFormat;
+  chain?: string; dex: Dex[]; protocol: PoolVersion[]; fee?: string; pool?: string; timeframe: Timeframe; from: string; to: string; format: CandleFormat;
   outDir: string; quote: string; fill: FillMode; includePartial?: boolean; force?: boolean; dryRun?: boolean; json?: boolean;
 }) => {
   if (pairsArg && options.pool) throw new Error('Give either pairs or --pool, not both.');
@@ -865,6 +869,103 @@ download.action(async (pairsArg: string | undefined, options: {
     progress('');
   }
   printDexDownloads(results, { json: Boolean(options.json), dryRun: Boolean(options.dryRun), timeframe: options.timeframe, from: range.start, to: range.end });
+  if (results.every((result) => result.error)) process.exitCode = 1;
+});
+
+const market = app.command('market-data').description('Download historical market prices (blended across all venues) for coins and pairs, as candles.');
+commandHelp(market, ['defi-tool market-data download ETH', 'defi-tool market-data download BTC/ETH,SOL --timeframe 1d --from 365d --format parquet'], [
+  'Prices are DefiLlama\'s blended USD price per coin, without a key. For pool prices on one exchange, use dex-data.',
+]);
+market.action(() => market.outputHelp());
+
+const marketDownload = market.command('download')
+  .description('Download market price candles (open, high, low, close) for coins or pairs and save them as files.')
+  .argument('<pairs>', 'coins or pairs, comma-separated: ETH (in USD), BTC/ETH (cross rate), coingecko:<id>, or chain:address such as base:0x…')
+  .addOption(choiceOption('--timeframe <size>', 'candle size', Object.keys(MARKET_TIMEFRAMES)).default('1h'))
+  .addOption(choiceOption('--sample <period>', 'spacing of the price samples candles are built from (auto: about 12 per candle, at least 5m)', ['auto', ...Object.keys(SAMPLE_PERIODS)]).default('auto'))
+  .option('--from <time>', 'start: a duration ago (30d, 12h, 2w), a UTC date (2026-10-01) or date-time (2026-10-01T12:00), or unix seconds', '30d')
+  .option('--to <time>', 'end, in the same forms as --from', 'now')
+  .addOption(choiceOption('--format <type>', 'file format: csv, json (metadata included), jsonl (one candle per line), parquet', CANDLE_FORMATS).default('csv'))
+  .option('--out-dir <folder>', 'folder for the files (created if needed)', 'market-data')
+  .addOption(choiceOption('--fill <mode>', 'periods without samples: forward = previous close, marked filled; none = leave them out', FILL_MODES).default('forward'))
+  .option('--include-partial', 'keep the newest candle even though its period has not ended')
+  .option('--force', 'replace files that already exist')
+  .option('--dry-run', 'show the coins found and how many requests, without downloading')
+  .option('--json', 'print the download summary as JSON');
+commandHelp(marketDownload, [
+  'defi-tool market-data download ETH',
+  'defi-tool market-data download ETH,BTC,SOL --timeframe 15m --from 7d',
+  'defi-tool market-data download BTC/ETH,ETH/USDT --timeframe 1d --from 2025-01-01 --format parquet',
+  'defi-tool market-data download coingecko:aerodrome-finance --timeframe 4h --from 90d',
+  'defi-tool market-data download base:0x940181a94a35a4569e4529a3cdfb74e38fd98631/ETH --dry-run',
+], [
+  'Prices are DefiLlama\'s blended USD price per coin across markets, without a key; DefiLlama keeps a sample about every 5 minutes, for roughly the last 800 days.',
+  'A single coin is priced in USD. A pair is a cross rate: the first coin\'s USD price divided by the second\'s at the same moment, so ETH/USDT shows a USDT depeg.',
+  'Symbols are looked up on CoinGecko; the coin with that symbol and the best market-cap rank wins, and the summary shows which. Use coingecko:<id> or chain:address to pick another.',
+  'Candles are built from samples: open = first, close = last, high/low = highest/lowest sample. Highs and lows between samples are missed; the samples column says how many were used. There is no volume.',
+  'Each file is checked: malformed or zero prices and duplicate samples are dropped, periods without samples are filled forward (filled=true) unless --fill none, and >50% jumps, thin candles and DefiLlama\'s confidence are reported.',
+  `Timeframes: ${Object.keys(MARKET_TIMEFRAMES).join(', ')}. Times are UTC; weeks start on Monday. Each request fetches up to 500 samples (250 per coin for a pair).`,
+]);
+marketDownload.action(async (pairsArg: string, options: {
+  timeframe: MarketTimeframe; sample: SamplePeriod | 'auto'; from: string; to: string; format: CandleFormat; outDir: string; fill: FillMode;
+  includePartial?: boolean; force?: boolean; dryRun?: boolean; json?: boolean;
+}) => {
+  const pairs = pairsArg.split(',').map((item) => item.trim()).filter(Boolean).map((text) => ({ text, tokens: parseMarketPair(text) }));
+  if (!pairs.length) throw new Error('Name one or more coins or pairs, e.g. defi-tool market-data download ETH,BTC/ETH.');
+  const sample = options.sample === 'auto' ? autoSample(options.timeframe) : options.sample;
+  if (SAMPLE_PERIODS[sample] > MARKET_TIMEFRAMES[options.timeframe]) throw new Error(`--sample ${sample} is longer than a ${options.timeframe} candle. Choose a shorter --sample or a longer --timeframe.`);
+  const nowMs = Date.now();
+  const range = marketRange(options.timeframe, parseTime(options.from, '--from', nowMs), parseTime(options.to, '--to', nowMs), Math.floor(nowMs / 1000), Boolean(options.includePartial));
+  const progress = (text: string) => { if (process.stderr.isTTY && !options.json) process.stderr.write(`\r\x1b[2K${text}`); };
+  const prices = { endpoint: process.env.DEFI_TOOL_PRICES_URL };
+
+  // Look up every coin first, once each, so a typo fails before any long download starts.
+  const coins = new Map<string, Promise<Coin>>();
+  const coin = (query: string) => {
+    const key = query.toLowerCase();
+    if (!coins.has(key)) coins.set(key, resolveCoin(query, (text) => { progress(`Looking up ${text} on CoinGecko…`); return searchCoins(text, { endpoint: process.env.DEFI_TOOL_COINGECKO_URL }); },
+      (keys) => coinSymbols(keys, prices)));
+    return coins.get(key)!;
+  };
+  const results: MarketDownload[] = [];
+  for (const pair of pairs) {
+    try {
+      const base = await coin(pair.tokens[0]);
+      const quote = await coin(pair.tokens[1]);
+      if (base.key === quote.key) throw new Error(`${pair.text} prices a coin in itself.`);
+      const dataset: Omit<MarketDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'> = {
+        source: 'defillama', pair: pair.text, base, quote, priceUnit: `${quote.symbol} per ${base.symbol}`,
+        method: quote.key === 'usd' ? `${base.symbol}'s blended USD price` : `cross rate: ${base.symbol} USD price ÷ ${quote.symbol} USD price`,
+        timeframe: options.timeframe, sample, from: isoTime(range.start), to: isoTime(range.end), fill: options.fill,
+      };
+      const fileName = marketFileName(base, quote, options.timeframe, range.start, range.end, options.format);
+      if (options.dryRun) {
+        results.push({ label: pair.text, dataset, plannedRequests: sampleRequests([base, quote], range.start, range.end, sample), files: [join(options.outDir, fileName)] });
+        continue;
+      }
+      // DefiLlama keeps smaller coins at 15-minute or coarser spacing; with --sample auto, a sparse result is retried at
+      // the next coarser spacing, and the fullest result is kept.
+      let best: { sample: SamplePeriod; series: Awaited<ReturnType<typeof downloadSamples>>['series']; score: number } | undefined;
+      let requests = 0;
+      for (const period of options.sample === 'auto' ? sampleCandidates(options.timeframe) : [sample]) {
+        const downloaded = await downloadSamples([base, quote], range.start, range.end, period, prices,
+          (count, reached) => progress(`${pair.text}: ${period} samples, ${count} request${count === 1 ? '' : 's'}, up to ${isoTime(reached).slice(0, 16).replace('T', ' ')}…`));
+        requests += downloaded.requests;
+        const score = coverage(buildCandles(base, quote, downloaded.series, options.timeframe, period, range.start, range.end, 'forward').candles);
+        if (!best || score > best.score) best = { sample: period, series: downloaded.series, score };
+        if (score >= 0.9) break;
+      }
+      const used = best!.sample;
+      const { candles, validation } = buildCandles(base, quote, best!.series, options.timeframe, used, range.start, range.end, options.fill);
+      const full: MarketDataset = { ...dataset, sample: used, downloadedAt: new Date().toISOString(), requests, candles: candles.length, validation };
+      results.push({ label: pair.text, dataset: full, files: await writeMarketData(options.outDir, fileName, candles, full, options.format, Boolean(options.force)) });
+    } catch (error) {
+      results.push({ label: pair.text, error: (error as Error).message });
+    }
+    progress('');
+  }
+  progress('');
+  printMarketDownloads(results, { json: Boolean(options.json), dryRun: Boolean(options.dryRun), timeframe: options.timeframe, from: range.start, to: range.end });
   if (results.every((result) => result.error)) process.exitCode = 1;
 });
 

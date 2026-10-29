@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ChainId, Dex, PoolVersion } from '../types.js';
-import { feeTierFromPercent, getJson, nonnegative } from './http.js';
+import { feeTierFromPercent, getJson, nonnegative, retryRateLimit } from './http.js';
 import { PUBLIC_POOLS_URL } from './public-pools.js';
 
 // Public REST API: https://apiguide.geckoterminal.com/ (about 30 requests a minute, no key).
@@ -90,19 +90,12 @@ export class GeckoTerminalClient {
     const url = new URL(`${(this.options.endpoint ?? PUBLIC_POOLS_URL).replace(/\/$/, '')}/${path}`);
     for (const [key, value] of Object.entries(params)) if (value !== undefined) url.searchParams.set(key, String(value));
     const interval = this.options.intervalMs ?? 2_100;
-    const task = this.pending.then(async () => {
-      for (let attempt = 0; ; attempt += 1) {
-        const wait = Math.max(0, interval - (Date.now() - this.lastRequest));
-        if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
-        this.lastRequest = Date.now();
-        try {
-          return await getJson(this.fetcher, url.href, 'GeckoTerminal', 20_000, interval);
-        } catch (error) {
-          if (!/HTTP 429/.test((error as Error).message) || attempt === 3) throw error;
-          await new Promise((resolve) => setTimeout(resolve, (this.options.rateLimitWaitMs ?? 20_000) * 2 ** attempt));
-        }
-      }
-    });
+    const task = this.pending.then(() => retryRateLimit(async () => {
+      const wait = Math.max(0, interval - (Date.now() - this.lastRequest));
+      if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+      this.lastRequest = Date.now();
+      return getJson(this.fetcher, url.href, 'GeckoTerminal', 20_000, interval);
+    }, this.options.rateLimitWaitMs ?? 20_000));
     this.pending = task.catch(() => undefined);
     return task;
   }

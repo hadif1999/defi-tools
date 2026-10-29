@@ -1,6 +1,6 @@
 # defi-tool
 
-A read-only DeFi CLI: pool discovery and ranking for Uniswap, PancakeSwap, Aerodrome and Curve (EVM chains) and Raydium (Solana), Uniswap LP position analysis and on-demand alerts, historical price candles for any of those pools, and transaction plans for new Uniswap v3 positions that your own wallet signs.
+A read-only DeFi CLI: pool discovery and ranking for Uniswap, PancakeSwap, Aerodrome and Curve (EVM chains) and Raydium (Solana), Uniswap LP position analysis and on-demand alerts, historical price candles for any of those pools and for the market as a whole, and transaction plans for new Uniswap v3 positions that your own wallet signs.
 
 **No Uniswap API key is needed.** Pool listings use DefiLlama's public yields API (GeckoTerminal is available as an alternative); position checks and alerts use public chain RPCs. A custom provider is optional.
 
@@ -30,6 +30,7 @@ defi-tool positions list --help
 defi-tool positions create --help
 defi-tool alerts check --help
 defi-tool dex-data download --help
+defi-tool market-data download --help
 defi-tool init --help
 ```
 
@@ -235,6 +236,35 @@ WETH/USDC: dex-data/WETH-USDC_base_uniswap-v3-0.05_0xd0b53d_15m_20261009-1200_20
 - **Files:** `--format csv` (default), `json` (metadata and candles in one document), `jsonl` (one candle per line) or `parquet` (`time` as a timestamp, prices and volume as doubles, `filled` as a boolean). Columns: `time` (ISO 8601 UTC), `timestamp` (unix seconds), `open`, `high`, `low`, `close`, `volume`, `filled`. Files go to `--out-dir` (default `./dex-data`), named by pair, network, exchange, version, fee, pool address prefix, timeframe and range. Each file except JSON gets a `.meta.json` beside it with the pool, tokens, units, range, request count and every check above (Parquet also carries it in its footer). Existing files are kept unless `--force`.
 - `--json` prints the summary as JSON. A pair that fails is reported on stderr while the others continue; the exit code is `1` only when every pair fails.
 
+## Market data
+
+`market-data download` saves the market price of coins and pairs, blended across all venues, as candles (open, high, low, close). It is about the market itself rather than one pool: for a specific DEX pool's prices, use [`dex-data`](#dex-data).
+
+```bash
+defi-tool market-data download ETH                                        # ETH in USD, 1h candles, last 30 days, CSV
+defi-tool market-data download ETH,BTC,SOL --timeframe 15m --from 7d
+defi-tool market-data download BTC/ETH,ETH/USDT --timeframe 1d --from 2025-01-01 --format parquet
+defi-tool market-data download coingecko:aerodrome-finance --timeframe 4h --from 90d
+defi-tool market-data download base:0x940181a94a35a4569e4529a3cdfb74e38fd98631/ETH --dry-run
+```
+
+```text
+Market data · 1h candles · 2026-09-29 19:00 – 2026-10-29 18:00 UTC
+Source: DefiLlama blended prices (no key) · coins found on CoinGecko
+
+#  Pair      Coin                      Quote                     Sample  Candles  Filled  Thin  Jumps  Confidence  First candle
+1  BTC/ETH   BTC (coingecko:bitcoin)   ETH (coingecko:ethereum)  5m          719       0     0      0        0.99  range start
+2  ETH/USDT  ETH (coingecko:ethereum)  USDT (coingecko:tether)   5m          719       0     0      0        0.99  range start
+```
+
+- **Source:** [DefiLlama's coins API](https://defillama.com/docs/api), without a key: one USD price per coin, blended from many markets, kept about every 5 minutes for roughly the last 800 days (coarser further back, and 15 minutes or more for smaller coins). Each request returns up to 500 samples across its coins (250 each for a pair), so ranges are fetched in steps; `--dry-run` shows the coins found and the number of requests.
+- **Pairs:** a single coin is priced in USD (`ETH` = `ETH/USD`). Two coins give a cross rate: the first coin's USD price divided by the second's at the same moment, each sample paired with the nearest quote sample within half a sample period, the way aggregators build crosses. `ETH/USDT` is therefore priced in actual USDT and shows a depeg; only `USD` itself is exactly 1.
+- **Coins:** symbols are looked up with [CoinGecko's search](https://docs.coingecko.com/) (free, no key); among coins with exactly that symbol, the best market-cap rank wins, and the summary prints the ID used (`ETH (coingecko:ethereum)`). Pick another with `coingecko:<id>`, or a token with `chain:address` as DefiLlama names chains (`ethereum`, `base`, `arbitrum`, `bsc`, `solana`, ...); these are checked with DefiLlama, which also supplies the symbol.
+- **Candles:** each period opens at its first sample, closes at its last, and takes the highest and lowest samples, so moves between samples are missed: highs and lows are approximate. The `samples` column says how many samples each candle used. There is no volume (DefiLlama has none). `--timeframe` `5m`, `15m`, `1h` (default), `4h`, `12h`, `1d`, `1w` (weeks start Monday 00:00 UTC).
+- **Sampling:** `--sample auto` (default) uses the widest spacing that still gives about 12 samples per candle (5m for 1h candles, 15m for 4h, 1h for 12h and 1d, 4h for 1w). When fewer than 90% of periods get samples, as for coins DefiLlama keeps less often, it retries at the next coarser spacing that fits in a candle and keeps the fullest result. `--sample 5m|15m|1h|4h|1d` fixes the spacing.
+- **Checks:** malformed and zero prices, duplicate samples, and samples outside the range are left out and counted. Periods without samples are filled with the previous close (`samples=0`, `filled=true`) unless `--fill none`; periods before the first sample are never filled. The summary reports **Thin** candles (under half the usual samples), **jumps** (closes over 50% from the previous close), DefiLlama's **confidence** score per coin (below 0.9 is flagged), a large share of filled candles, and few samples per candle.
+- **Time, files and options** work as in `dex-data`: `--from` (default `30d`) and `--to` (default `now`), finished periods only unless `--include-partial`, `--format csv|json|jsonl|parquet`, `--out-dir` (default `./market-data`), a `.meta.json` beside each file (pair, coin keys, method, sample spacing, range, requests and every check), `--force`, `--json`. Columns: `time`, `timestamp`, `open`, `high`, `low`, `close`, `samples`, `filled`. Files are named like `BTC-ETH_1h_20260929-1900_20261029-1800.csv`.
+
 ## Configuration
 
 `init` guides terminal users through chains, wallets, and optional RPC URLs; it does not ask for an API key. `defi-tool wallet add` is the easier way to save wallets: by name and network, editable later. Non-interactive callers can supply flags; remaining settings use defaults. Use real `0x` wallet addresses with 40 hexadecimal characters.
@@ -280,4 +310,4 @@ npm run build
 npm run dev -- positions --help
 ```
 
-Run everything with `npm test`. `DEFI_TOOL_DEXSCREENER_URL`, `DEFI_TOOL_REVERT_URL`, `DEFI_TOOL_PRICES_URL`, `DEFI_TOOL_ALCHEMY_URL` and `DEFI_TOOL_GECKOTERMINAL_URL` point DexScreener, Revert Finance, DefiLlama price lookups, Alchemy and dex-data downloads at test servers. Targeted provider checks: `node --import tsx --test tests/defillama-pools.test.ts tests/public-pools.test.ts tests/output.test.ts tests/rpc-positions.test.ts tests/analytics.test.ts tests/storage.test.ts`. CLI checks: `node --import tsx --test tests/config.test.ts tests/cli.test.ts tests/install.test.ts`. The project uses built-in `node:sqlite`, avoiding a native SQLite addon.
+Run everything with `npm test`. `DEFI_TOOL_DEXSCREENER_URL`, `DEFI_TOOL_REVERT_URL`, `DEFI_TOOL_PRICES_URL`, `DEFI_TOOL_ALCHEMY_URL`, `DEFI_TOOL_GECKOTERMINAL_URL` and `DEFI_TOOL_COINGECKO_URL` point DexScreener, Revert Finance, DefiLlama prices (also market-data), Alchemy, dex-data downloads and market-data coin lookups at test servers. Targeted provider checks: `node --import tsx --test tests/defillama-pools.test.ts tests/public-pools.test.ts tests/output.test.ts tests/rpc-positions.test.ts tests/analytics.test.ts tests/storage.test.ts`. CLI checks: `node --import tsx --test tests/config.test.ts tests/cli.test.ts tests/install.test.ts`. The project uses built-in `node:sqlite`, avoiding a native SQLite addon.
