@@ -8,8 +8,8 @@ import { GECKO_TIMEFRAMES, OHLCV_PAGE, type GeckoPool, type GeckoTerminalClient,
 
 /** GeckoTerminal's public API serves candles from the last 180 days only. */
 export const MAX_HISTORY_DAYS = 180;
-export const MARKET_FORMATS = ['csv', 'json', 'jsonl', 'parquet'] as const;
-export type MarketFormat = typeof MARKET_FORMATS[number];
+export const DEX_DATA_FORMATS = ['csv', 'json', 'jsonl', 'parquet'] as const;
+export type DexFormat = typeof DEX_DATA_FORMATS[number];
 export const FILL_MODES = ['forward', 'none'] as const;
 export type FillMode = typeof FILL_MODES[number];
 /** A close this far from the previous one (as a fraction) is reported as a jump worth checking. */
@@ -224,7 +224,7 @@ export function priceUnit(pool: GeckoPool, quote: string): { priced: GeckoToken;
   return { ...tokens, currency: 'token', label: `${tokens.quote.symbol} per ${tokens.priced.symbol}` };
 }
 
-export interface MarketDataset {
+export interface DexDataset {
   source: 'geckoterminal';
   pool: { chain: string; chainId: ChainId; dex?: Dex; dexId: string; version?: PoolVersion; address: string; name: string; feeTier?: number; tvlUsd?: number; createdAt?: string };
   pair: string;
@@ -247,7 +247,7 @@ const stamp = (seconds: number) => isoTime(seconds).slice(0, 16).replace(/[-:]/g
 const safe = (text: string) => text.replace(/[^A-Za-z0-9.]+/g, '').slice(0, 20) || 'token';
 
 /** A file name that says what is inside: WETH-USDC_base_uniswap-v3-0.05_1h_20260929-0000_20261029-0000.csv */
-export function datasetFileName(dataset: Omit<MarketDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'>, start: number, end: number, format: MarketFormat): string {
+export function datasetFileName(dataset: Omit<DexDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'>, start: number, end: number, format: DexFormat): string {
   const { pool } = dataset;
   const quote = dataset.quoteToken?.symbol ?? 'USD';
   const kind = [pool.dex ?? safe(pool.dexId), pool.version, pool.feeTier === undefined ? undefined : String(pool.feeTier / 10_000)].filter(Boolean).join('-');
@@ -259,7 +259,7 @@ const COLUMNS = ['time', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 
 const row = (candle: Candle) => ({ time: isoTime(candle.timestamp), ...candle });
 
 /** Encode candles in a format. JSON holds the metadata too; other formats get it in a .meta.json file beside them (Parquet also in its footer). */
-export function encodeCandles(candles: Candle[], dataset: MarketDataset, format: MarketFormat): Uint8Array | string {
+export function encodeCandles(candles: Candle[], dataset: DexDataset, format: DexFormat): Uint8Array | string {
   if (format === 'csv') return `${COLUMNS.join(',')}\n${candles.map((candle) => COLUMNS.map((column) => String(row(candle)[column])).join(',')).join('\n')}${candles.length ? '\n' : ''}`;
   if (format === 'jsonl') return candles.map((candle) => JSON.stringify(row(candle))).join('\n') + (candles.length ? '\n' : '');
   if (format === 'json') return `${JSON.stringify({ meta: dataset, candles: candles.map(row) }, null, 2)}\n`;
@@ -275,7 +275,7 @@ export function encodeCandles(candles: Candle[], dataset: MarketDataset, format:
 }
 
 /** Write the data file (and, except for JSON, its .meta.json); refuses to replace files unless `force`. Returns the paths written. */
-export async function writeDataset(directory: string, fileName: string, candles: Candle[], dataset: MarketDataset, format: MarketFormat, force: boolean): Promise<string[]> {
+export async function writeDataset(directory: string, fileName: string, candles: Candle[], dataset: DexDataset, format: DexFormat, force: boolean): Promise<string[]> {
   const path = join(directory, fileName);
   const metaPath = `${path}.meta.json`;
   const paths = format === 'json' ? [path] : [path, metaPath];

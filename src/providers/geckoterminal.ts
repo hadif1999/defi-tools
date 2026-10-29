@@ -149,7 +149,7 @@ export class GeckoTerminalClient {
 
   /**
    * Up to 1,000 candles ending at `before` (inclusive), newest first, as GeckoTerminal sends them:
-   * [unix seconds, open, high, low, close, volume]. Rows are not checked here; see market-data's validation.
+   * [unix seconds, open, high, low, close, volume]. Rows are not checked here; see dex-data's validation.
    * `token` is the token priced; with currency "token" prices are in the pool's other token, otherwise in USD.
    */
   async ohlcv(chainId: ChainId, pool: string, timeframe: Timeframe, options: { before?: number; token: string; currency: 'token' | 'usd'; limit?: number }): Promise<unknown[][]> {

@@ -6,7 +6,7 @@ import { ACTIVITY_KINDS, type ActivityKind, type Leg, type WalletActivity } from
 import type { CreatePlan, PlanTransaction } from './create-position.js';
 import { CHAINS, type SavedWallet } from './types.js';
 import type { GeckoPool } from './providers/geckoterminal.js';
-import type { MarketDataset } from './market-data.js';
+import type { DexDataset } from './dex-data.js';
 
 const MISSING = '—';
 
@@ -401,12 +401,12 @@ export function printHistory(result: HistoryResult, options: { json: boolean; ti
   console.log(`\n${notes.join('\n')}`);
 }
 
-/** One pair or pool of a market-data download: what was used, and what was written or went wrong. */
-export interface MarketDownload {
+/** One pair or pool of a dex-data download: what was used, and what was written or went wrong. */
+export interface DexDownload {
   label: string;
   pool?: GeckoPool;
   alternatives: GeckoPool[];
-  dataset?: Omit<MarketDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'> & Partial<MarketDataset>;
+  dataset?: Omit<DexDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'> & Partial<DexDataset>;
   plannedRequests?: number;
   files?: string[];
   error?: string;
@@ -414,15 +414,15 @@ export interface MarketDownload {
 
 const geckoPoolLabel = (pool: GeckoPool) => `${pool.name}${pool.version ? ` ${pool.version}` : ''} ${pool.dex ? pool.dex[0]!.toUpperCase() + pool.dex.slice(1) : pool.dexId}`;
 
-/** The market-data summary: one row per pair with the pool used, candle counts and checks, then files and notes. */
-export function printMarketDownloads(results: MarketDownload[], options: { json: boolean; dryRun: boolean; timeframe: string; from: number; to: number }): void {
+/** The dex-data summary: one row per pair with the pool used, candle counts and checks, then files and notes. */
+export function printDexDownloads(results: DexDownload[], options: { json: boolean; dryRun: boolean; timeframe: string; from: number; to: number }): void {
   if (options.json) {
     console.log(JSON.stringify({ data: results.map((result) => ({ pair: result.label, ...(result.dataset ?? {}), plannedRequests: result.plannedRequests, files: result.files, alternatives: result.alternatives.map((pool) => ({ address: pool.address, name: pool.name, dexId: pool.dexId, tvlUsd: pool.tvlUsd, chainId: pool.chainId })), error: result.error })) }, null, 2));
     return;
   }
   const exact = (value: number | undefined) => value === undefined ? MISSING : value.toLocaleString('en-US');
   const day = (seconds: number) => new Date(seconds * 1000).toISOString().slice(0, 16).replace('T', ' ');
-  console.log(`Market data · ${options.timeframe} candles · ${day(options.from)} – ${day(options.to)} UTC${options.dryRun ? ' · dry run' : ''}`);
+  console.log(`DEX data · ${options.timeframe} candles · ${day(options.from)} – ${day(options.to)} UTC${options.dryRun ? ' · dry run' : ''}`);
   console.log('Source: GeckoTerminal public API (no key)\n');
   const done = results.filter((result) => result.pool && !result.error);
   if (done.length) {

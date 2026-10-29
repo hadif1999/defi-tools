@@ -14,7 +14,7 @@ import { DefiLlamaPoolsClient, defiLlamaListsChain } from './providers/defillama
 import { RpcProvider } from './providers/rpc.js';
 import { DexScreenerClient, normalizeAddress, similarTvl, type PoolDetails } from './providers/dexscreener.js';
 import { hooklessV4PoolId } from './providers/pool-address.js';
-import { poolDex, printCreatePlan, printHistory, printMarketDownloads, printPoolList, printPools, printPositions, printPositionTables, printWallets, type MarketDownload, type Signer } from './output.js';
+import { poolDex, printCreatePlan, printHistory, printDexDownloads, printPoolList, printPools, printPositions, printPositionTables, printWallets, type DexDownload, type Signer } from './output.js';
 import { parseAmount, parseDeadline, parseLimit, planPosition } from './create-position.js';
 import { CREATE_CHAINS } from './providers/tokens.js';
 import { walletBalances } from './providers/balances.js';
@@ -24,7 +24,7 @@ import { RevertClient } from './providers/revert.js';
 import { loadPortfolio, splitPositions, type PositionSource, type WalletGroup } from './positions.js';
 import { GECKO_TIMEFRAMES, GeckoTerminalClient, OHLCV_PAGE, type GeckoPool, type Timeframe } from './providers/geckoterminal.js';
 import { feeTierFromPercent } from './providers/http.js';
-import { candleRange, cleanCandles, datasetFileName, downloadCandles, findPools, isoTime, parseTime, priceUnit, writeDataset, FILL_MODES, MARKET_FORMATS, MAX_HISTORY_DAYS, type FillMode, type MarketDataset, type MarketFormat } from './market-data.js';
+import { candleRange, cleanCandles, datasetFileName, downloadCandles, findPools, isoTime, parseTime, priceUnit, writeDataset, FILL_MODES, DEX_DATA_FORMATS, MAX_HISTORY_DAYS, type FillMode, type DexDataset, type DexFormat } from './dex-data.js';
 import { ACTIVITY_KINDS, CHAINS, DEXES, SOLANA, type ActivityKind, POOL_SORTS, POOL_VERSIONS, isEvmChain, type AppConfig, type Dex, type EvmChainId, type PoolScore, type ChainId, type Pool, type PoolSort, type PoolVersion, type PositionAnalysis, type Protocol, type SavedWallet } from './types.js';
 
 const DEFAULT_TOP = 25;
@@ -35,7 +35,7 @@ const app = new Command().name('defi-tool')
   .configureHelp({ showGlobalOptions: true }).showSuggestionAfterError(true)
   .showHelpAfterError('Run defi-tool --help, or add --help after any command for examples.');
 const configPath = (): string => app.opts().config ?? process.env.DEFI_TOOL_CONFIG ?? DEFAULT_CONFIG_PATH;
-commandHelp(app, ['defi-tool init', 'defi-tool chains', 'defi-tool pools scan --chain eth', 'defi-tool pools get WSOL/USDC', 'defi-tool wallet add 0xYourWallet --chain eth --name main', 'defi-tool positions list --wallet main', 'defi-tool market-data download WETH/USDC --chain base'], [
+commandHelp(app, ['defi-tool init', 'defi-tool chains', 'defi-tool pools scan --chain eth', 'defi-tool pools get WSOL/USDC', 'defi-tool wallet add 0xYourWallet --chain eth --name main', 'defi-tool positions list --wallet main', 'defi-tool dex-data download WETH/USDC --chain base'], [
   'No API key or setup is needed for public data. wallet add saves wallets by name; init optionally saves networks and settings.',
   'Add --help to any command, e.g. defi-tool positions analyze --help.',
   `Use --json on data commands for scripts. Chain names: ${Object.values(CHAINS).map((chain) => chain.slug).join(', ')}, all.`,
@@ -748,13 +748,13 @@ function dataSource(options: { source?: 'public' | 'custom'; apiUrl?: string }, 
   return options.source ?? ((options.apiUrl ?? config.apiUrl) !== DEFAULT_API_URL ? 'custom' : 'public');
 }
 
-const marketData = app.command('market-data').description('Download historical price candles (OHLCV) for DEX pools, checked and gap-filled.');
-commandHelp(marketData, ['defi-tool market-data download WETH/USDC --chain base', 'defi-tool market-data download WETH/USDC,cbBTC/USDC --chain base --timeframe 15m --from 7d --format parquet'], [
+const dexData = app.command('dex-data').description('Download historical price candles (OHLCV) for DEX pools, checked and gap-filled.');
+commandHelp(dexData, ['defi-tool dex-data download WETH/USDC --chain base', 'defi-tool dex-data download WETH/USDC,cbBTC/USDC --chain base --timeframe 15m --from 7d --format parquet'], [
   'Candles come from GeckoTerminal\'s public API, without a key. It keeps the last 180 days.',
 ]);
-marketData.action(() => marketData.outputHelp());
+dexData.action(() => dexData.outputHelp());
 
-const download = marketData.command('download')
+const download = dexData.command('download')
   .description('Download price candles (open, high, low, close, volume) for one or more pools and save them as files.')
   .argument('[pairs]', 'token pairs, comma-separated, e.g. WETH/USDC,cbBTC/USDC: symbols or addresses, in either order')
   .option('--chain <names>', 'networks to search, e.g. base or eth,arb (default: saved chains); each pair uses its deepest matching pool')
@@ -769,8 +769,8 @@ const download = marketData.command('download')
   .addOption(choiceOption('--timeframe <size>', 'candle size', Object.keys(GECKO_TIMEFRAMES)).default('1h'))
   .option('--from <time>', `start: a duration ago (30d, 12h, 2w), a UTC date (2026-10-01) or date-time (2026-10-01T12:00), or unix seconds; at most ${MAX_HISTORY_DAYS}d`, '30d')
   .option('--to <time>', 'end, in the same forms as --from', 'now')
-  .addOption(choiceOption('--format <type>', 'file format: csv, json (metadata included), jsonl (one candle per line), parquet', MARKET_FORMATS).default('csv'))
-  .option('--out-dir <folder>', 'folder for the files (created if needed)', 'market-data')
+  .addOption(choiceOption('--format <type>', 'file format: csv, json (metadata included), jsonl (one candle per line), parquet', DEX_DATA_FORMATS).default('csv'))
+  .option('--out-dir <folder>', 'folder for the files (created if needed)', 'dex-data')
   .option('--quote <token>', 'price unit: auto (stablecoin, then native coin), usd, or one of the pair\'s tokens', 'auto')
   .addOption(choiceOption('--fill <mode>', 'periods without trades: forward = previous close, zero volume, marked filled; none = leave them out', FILL_MODES).default('forward'))
   .option('--include-partial', 'keep the newest candle even though its period has not ended')
@@ -778,12 +778,12 @@ const download = marketData.command('download')
   .option('--dry-run', 'show which pools would be used and how many requests, without downloading')
   .option('--json', 'print the download summary as JSON');
 commandHelp(download, [
-  'defi-tool market-data download WETH/USDC --chain base',
-  'defi-tool market-data download WETH/USDC,cbBTC/USDC --chain base --fee 0.05 --timeframe 15m --from 7d',
-  'defi-tool market-data download ETH/USDC --chain eth,arb --protocol v3,v4 --format parquet --out-dir ./data',
-  'defi-tool market-data download WETH/USDC --chain arb --from 2026-09-01 --to 2026-10-01 --timeframe 1d --quote usd',
-  'defi-tool market-data download SOL/USDC --chain solana --dex raydium --protocol clmm',
-  'defi-tool market-data download --pool 0xd0b53d9277642d899df5c87a3966a349a798f224 --chain base --dry-run',
+  'defi-tool dex-data download WETH/USDC --chain base',
+  'defi-tool dex-data download WETH/USDC,cbBTC/USDC --chain base --fee 0.05 --timeframe 15m --from 7d',
+  'defi-tool dex-data download ETH/USDC --chain eth,arb --protocol v3,v4 --format parquet --out-dir ./data',
+  'defi-tool dex-data download WETH/USDC --chain arb --from 2026-09-01 --to 2026-10-01 --timeframe 1d --quote usd',
+  'defi-tool dex-data download SOL/USDC --chain solana --dex raydium --protocol clmm',
+  'defi-tool dex-data download --pool 0xd0b53d9277642d899df5c87a3966a349a798f224 --chain base --dry-run',
 ], [
   'Candles come from GeckoTerminal\'s public API, without a key. It keeps the last 180 days, and returns up to 1,000 candles per request.',
   'Longer ranges are fetched page by page, with requests spaced about 2 seconds apart (the public limit is about 30 a minute). A rate limit waits and retries.',
@@ -794,11 +794,11 @@ commandHelp(download, [
   'Without --fee, each pair uses the deepest pool matching --dex and --protocol; the summary names the next ones.',
 ]);
 download.action(async (pairsArg: string | undefined, options: {
-  chain?: string; dex: Dex[]; protocol: PoolVersion[]; fee?: string; pool?: string; timeframe: Timeframe; from: string; to: string; format: MarketFormat;
+  chain?: string; dex: Dex[]; protocol: PoolVersion[]; fee?: string; pool?: string; timeframe: Timeframe; from: string; to: string; format: DexFormat;
   outDir: string; quote: string; fill: FillMode; includePartial?: boolean; force?: boolean; dryRun?: boolean; json?: boolean;
 }) => {
   if (pairsArg && options.pool) throw new Error('Give either pairs or --pool, not both.');
-  if (!pairsArg && !options.pool) throw new Error('Name one or more pairs, e.g. defi-tool market-data download WETH/USDC --chain base, or use --pool.');
+  if (!pairsArg && !options.pool) throw new Error('Name one or more pairs, e.g. defi-tool dex-data download WETH/USDC --chain base, or use --pool.');
   const config = await loadConfig(configPath());
   const chains = parseChains(options.chain) ?? config.chains;
   const feeTier = options.fee === undefined ? undefined : feeTierFromPercent(`${options.fee.replace(/%$/, '')}%`);
@@ -835,14 +835,14 @@ download.action(async (pairsArg: string | undefined, options: {
   }
   progress('');
 
-  const results: MarketDownload[] = [];
+  const results: DexDownload[] = [];
   for (const target of targets) {
     if (!target.pool) { results.push({ label: target.label, alternatives: [], error: target.error }); continue; }
     const pool = target.pool;
     try {
       const unit = priceUnit(pool, options.quote);
       const periods = (range.end - range.start) / GECKO_TIMEFRAMES[options.timeframe].seconds;
-      const base: Omit<MarketDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'> = {
+      const base: Omit<DexDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'> = {
         source: 'geckoterminal',
         pool: { chain: CHAINS[pool.chainId].slug, chainId: pool.chainId, dex: pool.dex, dexId: pool.dexId, version: pool.version, address: pool.address, name: pool.name, feeTier: pool.feeTier, tvlUsd: pool.tvlUsd, createdAt: pool.createdAt },
         pair: target.label, priceUnit: unit.label, pricedToken: unit.priced, quoteToken: unit.quote, volumeUnit: unit.quote?.symbol ?? 'USD',
@@ -856,7 +856,7 @@ download.action(async (pairsArg: string | undefined, options: {
       const { raw, requests } = await downloadCandles(client, pool, options.timeframe, range.start, range.end, { token: unit.priced.address, currency: unit.currency },
         (pages, oldest) => progress(`${target.label}: ${pages} request${pages === 1 ? '' : 's'}, back to ${isoTime(Math.max(oldest, range.start)).slice(0, 16).replace('T', ' ')}…`));
       const { candles, validation } = cleanCandles(raw, options.timeframe, range.start, range.end, options.fill);
-      const dataset: MarketDataset = { ...base, downloadedAt: new Date().toISOString(), requests, candles: candles.length, validation };
+      const dataset: DexDataset = { ...base, downloadedAt: new Date().toISOString(), requests, candles: candles.length, validation };
       const files = await writeDataset(options.outDir, fileName, candles, dataset, options.format, Boolean(options.force));
       results.push({ label: target.label, pool, alternatives: target.alternatives, dataset, files });
     } catch (error) {
@@ -864,7 +864,7 @@ download.action(async (pairsArg: string | undefined, options: {
     }
     progress('');
   }
-  printMarketDownloads(results, { json: Boolean(options.json), dryRun: Boolean(options.dryRun), timeframe: options.timeframe, from: range.start, to: range.end });
+  printDexDownloads(results, { json: Boolean(options.json), dryRun: Boolean(options.dryRun), timeframe: options.timeframe, from: range.start, to: range.end });
   if (results.every((result) => result.error)) process.exitCode = 1;
 });
 

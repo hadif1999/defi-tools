@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { asyncBufferFromFile, parquetMetadataAsync, parquetReadObjects } from 'hyparquet';
 import { classifyDex, GeckoTerminalClient, type GeckoPool } from '../src/providers/geckoterminal.js';
-import { candleRange, cleanCandles, datasetFileName, downloadCandles, findPools, parseTime, priceUnit, writeDataset, type MarketDataset } from '../src/market-data.js';
+import { candleRange, cleanCandles, datasetFileName, downloadCandles, findPools, parseTime, priceUnit, writeDataset, type DexDataset } from '../src/dex-data.js';
 
 const H = 3_600;
 const NOW = 1_793_275_000; // 2026-10-29 11:56:40 UTC
@@ -172,7 +172,7 @@ test('prices quote in the money-like token by default, or USD, or the token aske
 });
 
 test('files: CSV, JSON lines, JSON and Parquet hold the same candles, with metadata, and are not overwritten by accident', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'defi-tool-market-'));
+  const directory = mkdtempSync(join(tmpdir(), 'defi-tool-dex-'));
   try {
     const { candles, validation } = cleanCandles([candle(102 * H, 11), candle(100 * H, 10)], '1h', 100 * H, 103 * H, 'forward');
     const base = {
@@ -180,7 +180,7 @@ test('files: CSV, JSON lines, JSON and Parquet hold the same candles, with metad
       pair: 'WETH/USDC', priceUnit: 'USDC per WETH', pricedToken: POOL.quote, quoteToken: POOL.base, volumeUnit: 'USDC', timeframe: '1h' as const,
       from: '1970-01-05T04:00:00Z', to: '1970-01-05T07:00:00Z', fill: 'forward' as const,
     };
-    const dataset: MarketDataset = { ...base, downloadedAt: '2026-10-29T12:00:00.000Z', requests: 1, candles: candles.length, validation };
+    const dataset: DexDataset = { ...base, downloadedAt: '2026-10-29T12:00:00.000Z', requests: 1, candles: candles.length, validation };
     const name = datasetFileName(base, 100 * H, 103 * H, 'csv');
     assert.equal(name, 'WETH-USDC_base_uniswap-v3-0.05_0xd0b53d_1h_19700105-0400_19700105-0700.csv');
 
@@ -211,8 +211,8 @@ test('files: CSV, JSON lines, JSON and Parquet hold the same candles, with metad
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('market-data download finds the pool, downloads, and writes a file per pair', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'defi-tool-market-cli-'));
+test('dex-data download finds the pool, downloads, and writes a file per pair', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'defi-tool-dex-cli-'));
   const now = Math.floor(Date.now() / 1000);
   const hour = Math.floor(now / H) * H;
   const server = createServer((request, response) => {
@@ -226,7 +226,7 @@ test('market-data download finds the pool, downloads, and writes a file per pair
   await new Promise<void>((resolve) => { server.listen(0, '127.0.0.1', resolve); });
   const { port } = server.address() as { port: number };
   try {
-    const result = await promisify(execFile)(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'market-data', 'download', 'ETH/USDC', '--chain', 'base', '--fee', '0.05', '--from', '2d', '--out-dir', directory, '--json'], {
+    const result = await promisify(execFile)(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'dex-data', 'download', 'ETH/USDC', '--chain', 'base', '--fee', '0.05', '--from', '2d', '--out-dir', directory, '--json'], {
       encoding: 'utf8', timeout: 20_000,
       env: { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('DEFI_TOOL_'))), DEFI_TOOL_CONFIG: join(directory, 'missing.json'), DEFI_TOOL_GECKOTERMINAL_URL: `http://127.0.0.1:${port}` },
     });

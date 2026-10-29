@@ -29,7 +29,7 @@ defi-tool pools rank --help
 defi-tool positions list --help
 defi-tool positions create --help
 defi-tool alerts check --help
-defi-tool market-data download --help
+defi-tool dex-data download --help
 defi-tool init --help
 ```
 
@@ -203,27 +203,27 @@ added $346.00 · removed $325.73 · fees collected $5.19 · gas $2.60
 - **Options:** `--chain` (default: the saved wallet's network; every EVM network for a plain address), `--days` 1–365 (default 30), `--type` with `swap`, `add-liquidity`, `remove-liquidity`, `collect-fees`, `send`, `receive`, `wrap`, `unwrap`, `other`, or `lp` for all three liquidity kinds, `--top` 1–500 (default 50), `--json` (full hashes and explorer links). Alias: `wallet tx`.
 - **Not listed:** approvals and other transactions that moved no tokens, NFT transfers, and Solana wallets.
 
-## Market data
+## DEX data
 
-`market-data download` saves historical price candles (open, high, low, close, volume) for specific DEX pools as files, checked and gap-filled, ready for charts or analysis.
+`dex-data download` saves historical price candles (open, high, low, close, volume) for specific DEX pools as files, checked and gap-filled, ready for charts or analysis.
 
 ```bash
-defi-tool market-data download WETH/USDC --chain base                       # 1h candles, last 30 days, CSV
-defi-tool market-data download WETH/USDC,cbBTC/USDC --chain base --fee 0.05 --timeframe 15m --from 7d
-defi-tool market-data download ETH/USDC --chain eth,arb --protocol v3,v4 --format parquet --out-dir ./data
-defi-tool market-data download WETH/USDC --chain arb --from 2026-09-01 --to 2026-10-01 --timeframe 1d --quote usd
-defi-tool market-data download SOL/USDC --chain solana --dex raydium --protocol clmm
-defi-tool market-data download --pool 0xd0b53d9277642d899df5c87a3966a349a798f224 --chain base --dry-run
+defi-tool dex-data download WETH/USDC --chain base                       # 1h candles, last 30 days, CSV
+defi-tool dex-data download WETH/USDC,cbBTC/USDC --chain base --fee 0.05 --timeframe 15m --from 7d
+defi-tool dex-data download ETH/USDC --chain eth,arb --protocol v3,v4 --format parquet --out-dir ./data
+defi-tool dex-data download WETH/USDC --chain arb --from 2026-09-01 --to 2026-10-01 --timeframe 1d --quote usd
+defi-tool dex-data download SOL/USDC --chain solana --dex raydium --protocol clmm
+defi-tool dex-data download --pool 0xd0b53d9277642d899df5c87a3966a349a798f224 --chain base --dry-run
 ```
 
 ```text
-Market data · 15m candles · 2026-10-09 12:00 – 2026-10-29 11:45 UTC
+DEX data · 15m candles · 2026-10-09 12:00 – 2026-10-29 11:45 UTC
 Source: GeckoTerminal public API (no key)
 
 #  Pair       Chain  Pool                            TVL  Unit           Candles  Filled  Dropped  Jumps  First candle
 1  WETH/USDC  Base   USDC / WETH 0.05% v3 Uniswap  $8.3M  USDC per WETH    1,919       0        0      0  range start
 
-WETH/USDC: market-data/WETH-USDC_base_uniswap-v3-0.05_0xd0b53d_15m_20261009-1200_20261029-1145.csv, …csv.meta.json
+WETH/USDC: dex-data/WETH-USDC_base_uniswap-v3-0.05_0xd0b53d_15m_20261009-1200_20261029-1145.csv, …csv.meta.json
 ```
 
 - **Source:** [GeckoTerminal's public OHLCV API](https://apiguide.geckoterminal.com/), without a key. It serves the **last 180 days** only (older requests fail with a clear message) and at most 1,000 candles per request, so longer ranges are fetched page by page, newest first. Requests are spaced about 2 seconds apart (the public limit is about 30 a minute); a rate-limit response waits 20 s, 40 s, 80 s and retries. `--dry-run` shows the pools chosen and the number of requests without downloading.
@@ -232,7 +232,7 @@ WETH/USDC: market-data/WETH-USDC_base_uniswap-v3-0.05_0xd0b53d_15m_20261009-1200
 - **Prices:** `--quote auto` (default) prices in the more money-like token: a stablecoin, then the native coin, then BTC (`USDC per WETH`), as `positions list` does. `--quote usd` gives USD prices; `--quote WETH` names the quote token. Volume is in the same unit.
 - **Checks:** rows that are malformed, not aligned to the timeframe, with zero or negative prices, negative volume, or a high/low that does not contain the open and close are dropped and counted by reason. Repeated periods are merged; GeckoTerminal returns a partial copy of the candle at each page boundary, which is skipped. Closes more than 50% from the previous close are counted as **jumps** to look at, not removed.
 - **Gaps:** GeckoTerminal sends no candle for a period without trades. `--fill forward` (default) adds one at the previous close with zero volume and `filled=true`, since a pool's price cannot move without a trade; `--fill none` leaves them out. Periods before the first trade in the range are never filled; the summary says when the data starts late.
-- **Files:** `--format csv` (default), `json` (metadata and candles in one document), `jsonl` (one candle per line) or `parquet` (`time` as a timestamp, prices and volume as doubles, `filled` as a boolean). Columns: `time` (ISO 8601 UTC), `timestamp` (unix seconds), `open`, `high`, `low`, `close`, `volume`, `filled`. Files go to `--out-dir` (default `./market-data`), named by pair, network, exchange, version, fee, pool address prefix, timeframe and range. Each file except JSON gets a `.meta.json` beside it with the pool, tokens, units, range, request count and every check above (Parquet also carries it in its footer). Existing files are kept unless `--force`.
+- **Files:** `--format csv` (default), `json` (metadata and candles in one document), `jsonl` (one candle per line) or `parquet` (`time` as a timestamp, prices and volume as doubles, `filled` as a boolean). Columns: `time` (ISO 8601 UTC), `timestamp` (unix seconds), `open`, `high`, `low`, `close`, `volume`, `filled`. Files go to `--out-dir` (default `./dex-data`), named by pair, network, exchange, version, fee, pool address prefix, timeframe and range. Each file except JSON gets a `.meta.json` beside it with the pool, tokens, units, range, request count and every check above (Parquet also carries it in its footer). Existing files are kept unless `--force`.
 - `--json` prints the summary as JSON. A pair that fails is reported on stderr while the others continue; the exit code is `1` only when every pair fails.
 
 ## Configuration
@@ -280,4 +280,4 @@ npm run build
 npm run dev -- positions --help
 ```
 
-Run everything with `npm test`. `DEFI_TOOL_DEXSCREENER_URL`, `DEFI_TOOL_REVERT_URL`, `DEFI_TOOL_PRICES_URL`, `DEFI_TOOL_ALCHEMY_URL` and `DEFI_TOOL_GECKOTERMINAL_URL` point DexScreener, Revert Finance, DefiLlama price lookups, Alchemy and market-data downloads at test servers. Targeted provider checks: `node --import tsx --test tests/defillama-pools.test.ts tests/public-pools.test.ts tests/output.test.ts tests/rpc-positions.test.ts tests/analytics.test.ts tests/storage.test.ts`. CLI checks: `node --import tsx --test tests/config.test.ts tests/cli.test.ts tests/install.test.ts`. The project uses built-in `node:sqlite`, avoiding a native SQLite addon.
+Run everything with `npm test`. `DEFI_TOOL_DEXSCREENER_URL`, `DEFI_TOOL_REVERT_URL`, `DEFI_TOOL_PRICES_URL`, `DEFI_TOOL_ALCHEMY_URL` and `DEFI_TOOL_GECKOTERMINAL_URL` point DexScreener, Revert Finance, DefiLlama price lookups, Alchemy and dex-data downloads at test servers. Targeted provider checks: `node --import tsx --test tests/defillama-pools.test.ts tests/public-pools.test.ts tests/output.test.ts tests/rpc-positions.test.ts tests/analytics.test.ts tests/storage.test.ts`. CLI checks: `node --import tsx --test tests/config.test.ts tests/cli.test.ts tests/install.test.ts`. The project uses built-in `node:sqlite`, avoiding a native SQLite addon.

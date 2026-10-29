@@ -8,4 +8,4 @@ dist/
 uniswap.secret
 graphify-out/
 src/graphify-out/
-market-data/
+dex-data/
