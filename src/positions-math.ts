@@ -26,9 +26,10 @@ export function amountsForLiquidity(liquidity: bigint, sqrtPriceX96: bigint, tic
 }
 
 const STABLES = new Set(['usdc', 'usdt', 'dai', 'usds', 'usde', 'usdc.e', 'usdbc', 'usdt0', 'fdusd', 'busd', 'pyusd', 'frax', 'lusd', 'gho', 'crvusd', 'tusd']);
-const NATIVES = new Set(['weth', 'eth', 'wbnb', 'bnb', 'wpol', 'pol', 'wmatic', 'matic']);
+const NATIVES = new Set(['weth', 'eth', 'wbnb', 'bnb', 'wpol', 'pol', 'wmatic', 'matic', 'sol', 'wsol']);
 const BTC = new Set(['wbtc', 'cbbtc', 'btcb', 'tbtc']);
-const quoteRank = (symbol: string): number => {
+/** How money-like a token is, for choosing the quote: stablecoins 3, native coins 2, BTC 1, others 0. */
+export const quoteRank = (symbol: string): number => {
   const name = symbol.toLowerCase();
   return STABLES.has(name) ? 3 : NATIVES.has(name) ? 2 : BTC.has(name) ? 1 : 0;
 };

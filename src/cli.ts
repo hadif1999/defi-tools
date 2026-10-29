@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { join } from 'node:path';
 import { Command, InvalidArgumentError, Option } from 'commander';
 import { z } from 'zod';
 import { loadConfig, parseChains, parseChoice, parsePoolSorts, parsePoolVersions, parseDexes, parseWallets, parsePositiveInt, parseUsdAmount, DEFAULT_API_URL, DEFAULT_CONFIG_PATH, DEFAULT_DATABASE_PATH } from './config.js';
@@ -13,7 +14,7 @@ import { DefiLlamaPoolsClient, defiLlamaListsChain } from './providers/defillama
 import { RpcProvider } from './providers/rpc.js';
 import { DexScreenerClient, normalizeAddress, similarTvl, type PoolDetails } from './providers/dexscreener.js';
 import { hooklessV4PoolId } from './providers/pool-address.js';
-import { poolDex, printCreatePlan, printHistory, printPoolList, printPools, printPositions, printPositionTables, printWallets, type Signer } from './output.js';
+import { poolDex, printCreatePlan, printHistory, printMarketDownloads, printPoolList, printPools, printPositions, printPositionTables, printWallets, type MarketDownload, type Signer } from './output.js';
 import { parseAmount, parseDeadline, parseLimit, planPosition } from './create-position.js';
 import { CREATE_CHAINS } from './providers/tokens.js';
 import { walletBalances } from './providers/balances.js';
@@ -21,17 +22,20 @@ import { AlchemyClient } from './providers/alchemy.js';
 import { walletHistory } from './history.js';
 import { RevertClient } from './providers/revert.js';
 import { loadPortfolio, splitPositions, type PositionSource, type WalletGroup } from './positions.js';
+import { GECKO_TIMEFRAMES, GeckoTerminalClient, OHLCV_PAGE, type GeckoPool, type Timeframe } from './providers/geckoterminal.js';
+import { feeTierFromPercent } from './providers/http.js';
+import { candleRange, cleanCandles, datasetFileName, downloadCandles, findPools, isoTime, parseTime, priceUnit, writeDataset, FILL_MODES, MARKET_FORMATS, MAX_HISTORY_DAYS, type FillMode, type MarketDataset, type MarketFormat } from './market-data.js';
 import { ACTIVITY_KINDS, CHAINS, DEXES, SOLANA, type ActivityKind, POOL_SORTS, POOL_VERSIONS, isEvmChain, type AppConfig, type Dex, type EvmChainId, type PoolScore, type ChainId, type Pool, type PoolSort, type PoolVersion, type PositionAnalysis, type Protocol, type SavedWallet } from './types.js';
 
 const DEFAULT_TOP = 25;
 
 const app = new Command().name('defi-tool')
-  .description('Find Uniswap, PancakeSwap, Aerodrome, Curve and Raydium pools and check the health of your Uniswap LP positions. All commands are read-only.')
+  .description('Find Uniswap, PancakeSwap, Aerodrome, Curve and Raydium pools check the health of your Uniswap LP positions, and download pool price history. All commands are read-only.')
   .version('0.1.0').option('--config <file>', 'use a different configuration file')
   .configureHelp({ showGlobalOptions: true }).showSuggestionAfterError(true)
   .showHelpAfterError('Run defi-tool --help, or add --help after any command for examples.');
 const configPath = (): string => app.opts().config ?? process.env.DEFI_TOOL_CONFIG ?? DEFAULT_CONFIG_PATH;
-commandHelp(app, ['defi-tool init', 'defi-tool chains', 'defi-tool pools scan --chain eth', 'defi-tool pools get WSOL/USDC', 'defi-tool wallet add 0xYourWallet --chain eth --name main', 'defi-tool positions list --wallet main'], [
+commandHelp(app, ['defi-tool init', 'defi-tool chains', 'defi-tool pools scan --chain eth', 'defi-tool pools get WSOL/USDC', 'defi-tool wallet add 0xYourWallet --chain eth --name main', 'defi-tool positions list --wallet main', 'defi-tool market-data download WETH/USDC --chain base'], [
   'No API key or setup is needed for public data. wallet add saves wallets by name; init optionally saves networks and settings.',
   'Add --help to any command, e.g. defi-tool positions analyze --help.',
   `Use --json on data commands for scripts. Chain names: ${Object.values(CHAINS).map((chain) => chain.slug).join(', ')}, all.`,
@@ -743,6 +747,126 @@ function parseWalletName(value: string): string {
 function dataSource(options: { source?: 'public' | 'custom'; apiUrl?: string }, config: AppConfig): 'public' | 'custom' {
   return options.source ?? ((options.apiUrl ?? config.apiUrl) !== DEFAULT_API_URL ? 'custom' : 'public');
 }
+
+const marketData = app.command('market-data').description('Download historical price candles (OHLCV) for DEX pools, checked and gap-filled.');
+commandHelp(marketData, ['defi-tool market-data download WETH/USDC --chain base', 'defi-tool market-data download WETH/USDC,cbBTC/USDC --chain base --timeframe 15m --from 7d --format parquet'], [
+  'Candles come from GeckoTerminal\'s public API, without a key. It keeps the last 180 days.',
+]);
+marketData.action(() => marketData.outputHelp());
+
+const download = marketData.command('download')
+  .description('Download price candles (open, high, low, close, volume) for one or more pools and save them as files.')
+  .argument('[pairs]', 'token pairs, comma-separated, e.g. WETH/USDC,cbBTC/USDC: symbols or addresses, in either order')
+  .option('--chain <names>', 'networks to search, e.g. base or eth,arb (default: saved chains); each pair uses its deepest matching pool')
+  .addOption(new Option('--dex <names>', `exchanges to consider, comma-separated: ${DEXES.join(', ')}, or all`)
+    .argParser((value: string) => { try { return parseDexes(value); } catch (error) { throw new InvalidArgumentError((error as Error).message); } })
+    .default(['uniswap'], 'uniswap'))
+  .addOption(new Option('--protocol <versions>', 'pool types to consider, comma-separated: v2, v3, v4, clmm, amm, or all')
+    .argParser((value: string) => { try { return parsePoolVersions(value); } catch (error) { throw new InvalidArgumentError((error as Error).message); } })
+    .default(['v3'], 'v3'))
+  .option('--fee <percent>', 'fee tier in percent, e.g. 0.05 or 0.3 (default: the deepest pool, any tier)')
+  .option('--pool <addresses>', 'pool addresses or v4 pool IDs, comma-separated, instead of pairs (needs a single --chain)')
+  .addOption(choiceOption('--timeframe <size>', 'candle size', Object.keys(GECKO_TIMEFRAMES)).default('1h'))
+  .option('--from <time>', `start: a duration ago (30d, 12h, 2w), a UTC date (2026-10-01) or date-time (2026-10-01T12:00), or unix seconds; at most ${MAX_HISTORY_DAYS}d`, '30d')
+  .option('--to <time>', 'end, in the same forms as --from', 'now')
+  .addOption(choiceOption('--format <type>', 'file format: csv, json (metadata included), jsonl (one candle per line), parquet', MARKET_FORMATS).default('csv'))
+  .option('--out-dir <folder>', 'folder for the files (created if needed)', 'market-data')
+  .option('--quote <token>', 'price unit: auto (stablecoin, then native coin), usd, or one of the pair\'s tokens', 'auto')
+  .addOption(choiceOption('--fill <mode>', 'periods without trades: forward = previous close, zero volume, marked filled; none = leave them out', FILL_MODES).default('forward'))
+  .option('--include-partial', 'keep the newest candle even though its period has not ended')
+  .option('--force', 'replace files that already exist')
+  .option('--dry-run', 'show which pools would be used and how many requests, without downloading')
+  .option('--json', 'print the download summary as JSON');
+commandHelp(download, [
+  'defi-tool market-data download WETH/USDC --chain base',
+  'defi-tool market-data download WETH/USDC,cbBTC/USDC --chain base --fee 0.05 --timeframe 15m --from 7d',
+  'defi-tool market-data download ETH/USDC --chain eth,arb --protocol v3,v4 --format parquet --out-dir ./data',
+  'defi-tool market-data download WETH/USDC --chain arb --from 2026-09-01 --to 2026-10-01 --timeframe 1d --quote usd',
+  'defi-tool market-data download SOL/USDC --chain solana --dex raydium --protocol clmm',
+  'defi-tool market-data download --pool 0xd0b53d9277642d899df5c87a3966a349a798f224 --chain base --dry-run',
+], [
+  'Candles come from GeckoTerminal\'s public API, without a key. It keeps the last 180 days, and returns up to 1,000 candles per request.',
+  'Longer ranges are fetched page by page, with requests spaced about 2 seconds apart (the public limit is about 30 a minute). A rate limit waits and retries.',
+  `Timeframes: ${Object.keys(GECKO_TIMEFRAMES).join(', ')}. Times are UTC; each candle's time is the start of its period. Only finished periods are kept unless --include-partial.`,
+  'Each file is checked: malformed rows, misaligned times and impossible prices (high below open or close, zero prices) are dropped; overlapping pages are merged.',
+  'GeckoTerminal sends no candle for a period without trades. --fill forward (default) adds one at the previous close with zero volume and filled=true, since the pool price cannot move without a trade.',
+  'Prices are in the more money-like token (USDC per WETH) unless --quote says otherwise; volume is in the same unit. A .meta.json file beside each file records the pool, units and checks.',
+  'Without --fee, each pair uses the deepest pool matching --dex and --protocol; the summary names the next ones.',
+]);
+download.action(async (pairsArg: string | undefined, options: {
+  chain?: string; dex: Dex[]; protocol: PoolVersion[]; fee?: string; pool?: string; timeframe: Timeframe; from: string; to: string; format: MarketFormat;
+  outDir: string; quote: string; fill: FillMode; includePartial?: boolean; force?: boolean; dryRun?: boolean; json?: boolean;
+}) => {
+  if (pairsArg && options.pool) throw new Error('Give either pairs or --pool, not both.');
+  if (!pairsArg && !options.pool) throw new Error('Name one or more pairs, e.g. defi-tool market-data download WETH/USDC --chain base, or use --pool.');
+  const config = await loadConfig(configPath());
+  const chains = parseChains(options.chain) ?? config.chains;
+  const feeTier = options.fee === undefined ? undefined : feeTierFromPercent(`${options.fee.replace(/%$/, '')}%`);
+  if (options.fee !== undefined && feeTier === undefined) throw new Error(`--fee "${options.fee}" is not a fee tier. Use a percentage such as 0.01, 0.05, 0.3 or 1.`);
+  const nowMs = Date.now();
+  const now = Math.floor(nowMs / 1000);
+  const range = candleRange(options.timeframe, parseTime(options.from, '--from', nowMs), parseTime(options.to, '--to', nowMs), now, Boolean(options.includePartial));
+  const client = new GeckoTerminalClient({ endpoint: process.env.DEFI_TOOL_GECKOTERMINAL_URL });
+  const progress = (text: string) => { if (process.stderr.isTTY && !options.json) process.stderr.write(`\r\x1b[2K${text}`); };
+
+  // Find each target's pool first, so a typo fails before any long download starts.
+  const targets: Array<{ label: string; pool?: GeckoPool; alternatives: GeckoPool[]; error?: string }> = [];
+  if (options.pool) {
+    if (chains.length !== 1) throw new Error('--pool needs exactly one network, e.g. --chain base.');
+    for (const address of options.pool.split(',').map((item) => item.trim()).filter(Boolean)) {
+      try { targets.push({ label: address, pool: await client.pool(chains[0]!, address), alternatives: [] }); }
+      catch (error) { targets.push({ label: address, alternatives: [], error: (error as Error).message }); }
+    }
+  } else {
+    for (const text of pairsArg!.split(',').map((item) => item.trim()).filter(Boolean)) {
+      try {
+        const pair = parsePair(text);
+        const found: GeckoPool[] = [];
+        for (const chain of chains) {
+          progress(`Finding ${text} on ${CHAINS[chain].name}…`);
+          try { found.push(...await findPools(client, chain, { pair, dexes: options.dex, versions: options.protocol, feeTier })); }
+          catch (error) { console.error(`\n${text} on ${CHAINS[chain].name}: ${(error as Error).message}`); }
+        }
+        found.sort((a, b) => (b.tvlUsd ?? 0) - (a.tvlUsd ?? 0));
+        if (!found.length) throw new Error(`No ${options.protocol.join('/')} pool on ${options.dex.join('/')}${feeTier === undefined ? '' : ` at ${options.fee}%`} trades ${text} on ${chains.map((chain) => CHAINS[chain].name).join(', ')}. Try other --chain, --dex, --protocol or --fee values.`);
+        targets.push({ label: text, pool: found[0], alternatives: found.slice(1, 4) });
+      } catch (error) { targets.push({ label: text, alternatives: [], error: (error as Error).message }); }
+    }
+  }
+  progress('');
+
+  const results: MarketDownload[] = [];
+  for (const target of targets) {
+    if (!target.pool) { results.push({ label: target.label, alternatives: [], error: target.error }); continue; }
+    const pool = target.pool;
+    try {
+      const unit = priceUnit(pool, options.quote);
+      const periods = (range.end - range.start) / GECKO_TIMEFRAMES[options.timeframe].seconds;
+      const base: Omit<MarketDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'> = {
+        source: 'geckoterminal',
+        pool: { chain: CHAINS[pool.chainId].slug, chainId: pool.chainId, dex: pool.dex, dexId: pool.dexId, version: pool.version, address: pool.address, name: pool.name, feeTier: pool.feeTier, tvlUsd: pool.tvlUsd, createdAt: pool.createdAt },
+        pair: target.label, priceUnit: unit.label, pricedToken: unit.priced, quoteToken: unit.quote, volumeUnit: unit.quote?.symbol ?? 'USD',
+        timeframe: options.timeframe, from: isoTime(range.start), to: isoTime(range.end), fill: options.fill,
+      };
+      const fileName = datasetFileName(base, range.start, range.end, options.format);
+      if (options.dryRun) {
+        results.push({ label: target.label, pool, alternatives: target.alternatives, dataset: base, plannedRequests: Math.ceil(periods / OHLCV_PAGE), files: [join(options.outDir, fileName)] });
+        continue;
+      }
+      const { raw, requests } = await downloadCandles(client, pool, options.timeframe, range.start, range.end, { token: unit.priced.address, currency: unit.currency },
+        (pages, oldest) => progress(`${target.label}: ${pages} request${pages === 1 ? '' : 's'}, back to ${isoTime(Math.max(oldest, range.start)).slice(0, 16).replace('T', ' ')}…`));
+      const { candles, validation } = cleanCandles(raw, options.timeframe, range.start, range.end, options.fill);
+      const dataset: MarketDataset = { ...base, downloadedAt: new Date().toISOString(), requests, candles: candles.length, validation };
+      const files = await writeDataset(options.outDir, fileName, candles, dataset, options.format, Boolean(options.force));
+      results.push({ label: target.label, pool, alternatives: target.alternatives, dataset, files });
+    } catch (error) {
+      results.push({ label: target.label, pool, alternatives: target.alternatives, error: (error as Error).message });
+    }
+    progress('');
+  }
+  printMarketDownloads(results, { json: Boolean(options.json), dryRun: Boolean(options.dryRun), timeframe: options.timeframe, from: range.start, to: range.end });
+  if (results.every((result) => result.error)) process.exitCode = 1;
+});
 
 const help = app.command('help [command...]').description('Show help for any command or subcommand.');
 commandHelp(help, ['defi-tool help', 'defi-tool help pools rank', 'defi-tool help positions list'], [

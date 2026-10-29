@@ -5,6 +5,8 @@ import { activityValue, swapResult, type HistoryResult } from './history.js';
 import { ACTIVITY_KINDS, type ActivityKind, type Leg, type WalletActivity } from './types.js';
 import type { CreatePlan, PlanTransaction } from './create-position.js';
 import { CHAINS, type SavedWallet } from './types.js';
+import type { GeckoPool } from './providers/geckoterminal.js';
+import type { MarketDataset } from './market-data.js';
 
 const MISSING = '—';
 
@@ -397,4 +399,58 @@ export function printHistory(result: HistoryResult, options: { json: boolean; ti
   if (!result.sources.includes('Alchemy')) notes.push('Swaps and transfers need a free Alchemy key: export ALCHEMY_API_KEY=... (https://dashboard.alchemy.com). Liquidity activity needs no key.');
   else notes.push('Approvals and transactions that moved no tokens are not listed. --json gives full hashes and explorer links.');
   console.log(`\n${notes.join('\n')}`);
+}
+
+/** One pair or pool of a market-data download: what was used, and what was written or went wrong. */
+export interface MarketDownload {
+  label: string;
+  pool?: GeckoPool;
+  alternatives: GeckoPool[];
+  dataset?: Omit<MarketDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'> & Partial<MarketDataset>;
+  plannedRequests?: number;
+  files?: string[];
+  error?: string;
+}
+
+const geckoPoolLabel = (pool: GeckoPool) => `${pool.name}${pool.version ? ` ${pool.version}` : ''} ${pool.dex ? pool.dex[0]!.toUpperCase() + pool.dex.slice(1) : pool.dexId}`;
+
+/** The market-data summary: one row per pair with the pool used, candle counts and checks, then files and notes. */
+export function printMarketDownloads(results: MarketDownload[], options: { json: boolean; dryRun: boolean; timeframe: string; from: number; to: number }): void {
+  if (options.json) {
+    console.log(JSON.stringify({ data: results.map((result) => ({ pair: result.label, ...(result.dataset ?? {}), plannedRequests: result.plannedRequests, files: result.files, alternatives: result.alternatives.map((pool) => ({ address: pool.address, name: pool.name, dexId: pool.dexId, tvlUsd: pool.tvlUsd, chainId: pool.chainId })), error: result.error })) }, null, 2));
+    return;
+  }
+  const exact = (value: number | undefined) => value === undefined ? MISSING : value.toLocaleString('en-US');
+  const day = (seconds: number) => new Date(seconds * 1000).toISOString().slice(0, 16).replace('T', ' ');
+  console.log(`Market data · ${options.timeframe} candles · ${day(options.from)} – ${day(options.to)} UTC${options.dryRun ? ' · dry run' : ''}`);
+  console.log('Source: GeckoTerminal public API (no key)\n');
+  const done = results.filter((result) => result.pool && !result.error);
+  if (done.length) {
+    const columns = [{ header: '#', align: 'right' as const }, { header: 'Pair' }, { header: 'Chain' }, { header: 'Pool' }, { header: 'TVL', align: 'right' as const }, { header: 'Unit' },
+      ...(options.dryRun ? [{ header: 'Requests', align: 'right' as const }] : [{ header: 'Candles', align: 'right' as const }, { header: 'Filled', align: 'right' as const }, { header: 'Dropped', align: 'right' as const }, { header: 'Jumps', align: 'right' as const }, { header: 'First candle' }])];
+    console.log(renderTable(columns, done.map((result, index) => {
+      const validation = result.dataset!.validation;
+      const dropped = validation ? Object.values(validation.dropped).reduce((sum, count) => sum + count, 0) : 0;
+      const first = validation && result.dataset!.candles ? validation.leadingEmpty === 0 ? 'range start' : `+${formatCount(validation.leadingEmpty)} periods` : MISSING;
+      return [String(index + 1), result.label, CHAINS[result.pool!.chainId].name, geckoPoolLabel(result.pool!), formatUsd(result.pool!.tvlUsd), result.dataset!.priceUnit,
+        ...(options.dryRun ? [String(result.plannedRequests)] : [exact(result.dataset!.candles), exact(validation?.filled), exact(dropped), exact(validation?.jumps), result.dataset!.candles ? first : 'no trades']),
+      ];
+    })));
+    console.log('');
+    for (const result of done) {
+      console.log(`${result.label}: ${options.dryRun ? 'would write ' : ''}${result.files!.join(', ')}`);
+      const validation = result.dataset!.validation;
+      if (validation) {
+        const reasons = Object.entries(validation.dropped).map(([reason, count]) => `${count} ${reason}`);
+        if (validation.conflicts) reasons.push(`${validation.conflicts} repeated periods with different values (first kept)`);
+        if (reasons.length) console.log(`  Dropped: ${reasons.join(', ')}.`);
+        if (validation.jumps) console.log(`  ${validation.jumps} candle(s) closed more than 50% away from the previous close; check them before relying on the data.`);
+        if (validation.leadingEmpty && result.dataset!.candles) console.log(`  No trades in the first ${formatCount(validation.leadingEmpty)} periods (pool created ${result.pool!.createdAt?.slice(0, 10) ?? 'at an unknown date'}); the data starts at its first trade.`);
+        if (!result.dataset!.candles) console.log('  No trades in this range: the file has no candles.');
+        if (validation.missing && result.dataset!.fill === 'none') console.log(`  ${formatCount(validation.missing)} periods without trades are left out (--fill none).`);
+      }
+      if (result.alternatives.length) console.log(`  Other pools: ${result.alternatives.map((pool) => `${geckoPoolLabel(pool)} on ${CHAINS[pool.chainId].name} (${formatUsd(pool.tvlUsd)}, ${pool.address.slice(0, 10)}…)`).join('; ')}. Pick one with --fee, --protocol or --pool.`);
+    }
+  }
+  for (const result of results.filter((item) => item.error)) console.error(`${result.label}: ${result.error}`);
 }
