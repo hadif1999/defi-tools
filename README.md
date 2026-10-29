@@ -1,6 +1,6 @@
 # defi-tool
 
-A read-only DeFi CLI: pool discovery and ranking for Uniswap, PancakeSwap, Aerodrome and Curve (EVM chains) and Raydium (Solana), plus Uniswap LP position analysis and on-demand alerts.
+A read-only DeFi CLI: pool discovery and ranking for Uniswap, PancakeSwap, Aerodrome and Curve (EVM chains) and Raydium (Solana), Uniswap LP position analysis and on-demand alerts, and transaction plans for new Uniswap v3 positions that your own wallet signs.
 
 **No Uniswap API key is needed.** Pool listings use DefiLlama's public yields API (GeckoTerminal is available as an alternative); position checks and alerts use public chain RPCs. A custom provider is optional.
 
@@ -27,6 +27,7 @@ defi-tool chains
 defi-tool pools --help
 defi-tool pools rank --help
 defi-tool positions list --help
+defi-tool positions create --help
 defi-tool alerts check --help
 defi-tool init --help
 ```
@@ -128,6 +129,26 @@ The examples use a placeholder wallet; replace it with a real address. V3 discov
 **Robinhood Chain:** DefiLlama does not list Uniswap pools there, so pool commands need `--source geckoterminal` (the default source says so and exits). GeckoTerminal cannot sort by TVL, so the CLI fetches up to `--top` pools per version in GeckoTerminal's order (most transactions first) and sorts those; very large but inactive pools can be missed. GeckoTerminal has no 7D volume, and new tokens can show extreme APRs, so `--filter "tvl>100k"` helps. **BNB Chain** uses the default DefiLlama source (v3 and v4). Positions and alerts work on both chains through the official Uniswap v3/v4 contracts. `--top` sets the total number of pools shown (default 25, up to 200); `--limit` remains an alias. Public sources cover indexed pools, not every pool ever created.
 
 **Solana (Raydium):** `--chain solana` lists Raydium pools from the default DefiLlama source, with the DEX column showing Raydium and the Version column `CLMM` (concentrated) or `AMM` (standard); filter them with `--protocol clmm` or `--protocol amm`. Age and 1D txns come from DexScreener, matched by tokens, pool type and TVL. `--token SOL` also matches WSOL. Solana is for `pools scan` and `pools rank` only: positions and alerts read Uniswap NFTs on EVM chains, so they skip Solana (and refuse it when it is the only chain), and `--source geckoterminal`/`custom` do not list it. Raydium's largest pools by TVL include tokens with little trading, so `--sort volume` or `--filter "vol/tvl>0.05"` gives a more useful list.
+
+## Create a position
+
+`positions create` plans a new Uniswap v3 position on **Base** or **Arbitrum** and builds the transactions for your wallet to sign. It never signs or sends anything, so the CLI stays read-only.
+
+```bash
+defi-tool positions create WETH/USDC --chain base --wallet my-wallet --amount 100usd --lower-limit -15% --upper-limit +10%
+defi-tool positions create WETH/USDC --chain arb --fee 0.05 --wallet 0xYourWallet --amount 0.05weth --lower-limit 2000 --upper-limit 2700
+defi-tool positions create cbBTC/USDC --chain base --wallet my-wallet --amount max --lower-limit -20% --upper-limit +20% --signer raw
+defi-tool positions create --pool 0xPoolAddress --chain base --wallet my-wallet --amount 50usd --full-range --json
+```
+
+- **Range:** `--lower-limit` and `--upper-limit` need not be symmetric. Each is a percentage from the current price (`-15%`, `+10%`) or a price (`2100`), in the unit shown, which quotes the stablecoin or wrapped native coin (`USDC per WETH`). Ticks are widened outward to the pool's tick spacing, so the range is never narrower than asked. `--full-range` covers every price. A range that leaves out the current price starts out of range with one token, which the plan points out.
+- **Amount:** a USD total (`100usd`, `$100`) split by the range; one token's amount (`0.05weth`, `150usdc`), with the other worked out from the range; or `max`, the most the wallet's balances can fund.
+- **Pool:** the pair (symbols such as WETH, USDC, cbBTC, wstETH, ARB, or any token address) and `--fee 0.01|0.05|0.3|1`. Without `--fee`, the pool holding the most liquidity is used, and the other tiers are named. `--pool` takes a pool address instead.
+- **Exact math:** ticks, liquidity and token amounts use Uniswap's integer formulas (TickMath and LiquidityAmounts). Pool price, tick spacing, token decimals, balances and allowances are all read on-chain when the plan is built.
+- **Safety:** minimum amounts follow the Uniswap SDK's slippage method (`--slippage`, default 0.5%), and the mint expires after `--deadline` (default 20m). Approvals are added only when the allowance is short, and only for the amount needed (`--approve unlimited` to change that). USDT-style allowances are reset to 0 first. When no approval is needed, the mint is simulated from your wallet: a failure shows the node's revert reason; a success shows the NFT ID it would mint and the gas. After signing approvals, run the command again: the mint is rebuilt at the latest price and simulated.
+- **Native ETH:** with `--pay-with auto` (the default), the WETH side is paid in ETH when the wallet lacks WETH, keeping 0.0005 ETH for gas. The mint then wraps the ETH and refunds what it does not use. `--pay-with weth` or `eth` forces a choice.
+- **Volatility check:** 30 days of DefiLlama prices give the pair's daily volatility and how soon a typical move reaches each limit. Ranges a typical move leaves within a week get a warning, and so does the 0.01% tier for pairs that are not stablecoins.
+- **Signing:** `--signer mm` (default) prints a `mm wallet send-transaction` command per step for the MetaMask agent wallet CLI. `--signer raw` prints `to`, `value` and `data` for any other wallet. `mm decode --payload <data>` decodes any step for review. Ledger's wallet-cli cannot send contract calls on Base or Arbitrum. `--wallet` must be the address that signs: it pays the tokens and receives the position NFT.
 
 ## Wallets
 

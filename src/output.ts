@@ -1,6 +1,7 @@
 import type { LpPosition, Pool, PoolScore, PoolSort, PositionAnalysis } from './types.js';
 import { invertPrice, rangePosition } from './positions-math.js';
 import type { WalletSummary } from './storage.js';
+import type { CreatePlan, PlanTransaction } from './create-position.js';
 import { CHAINS } from './types.js';
 
 const MISSING = '—';
@@ -271,5 +272,55 @@ export function printPositionTables(active: LpPosition[], past: LpPosition[], op
   if (shown.some((position) => !position.historyAvailable)) notes.push('On-chain data only: deposits, withdrawals, collected fees, PnL and dates are unknown, and closed positions are the NFTs the wallet still holds.');
   if (shownPast.length) notes.push(shownPast.some((position) => position.exitPrice !== undefined) ? 'Exit price: pool price at the last withdrawal. Price now: current pool price.' : 'Price now: current pool price.');
   if (missing) notes.push('— means the source has no value for that position.');
+  console.log(`\n${notes.join('\n')}`);
+}
+
+export type Signer = 'mm' | 'raw';
+
+/** The command that signs and sends one planned transaction with the MetaMask agent wallet CLI. */
+export function mmCommand(chainId: number, transaction: PlanTransaction): string {
+  const payload = JSON.stringify({ to: transaction.to, data: transaction.data, value: `0x${BigInt(transaction.value).toString(16)}` });
+  return `mm wallet send-transaction --chain-id ${chainId} --payload '${payload}' --intent '${transaction.description.replaceAll("'", '')}'`;
+}
+
+/** A planned position: what will be deposited where, what to check, and the transactions to sign in order. */
+export function printCreatePlan(plan: CreatePlan, options: { json: boolean; signer: Signer }): void {
+  const commands = options.signer === 'mm' ? plan.transactions.map((transaction) => mmCommand(plan.chainId, transaction)) : undefined;
+  if (options.json) return console.log(JSON.stringify({ schemaVersion: 1, data: { ...plan, commands } }, null, 2));
+  const { token0, token1, range, deposit } = plan;
+  const fee = `${plan.pool.feeTier / 10_000}%`;
+  const amount = (value: string, symbol: string) => `${formatNumber(Number(value))} ${symbol}`;
+  const usd = (value: string, price: number | undefined) => price === undefined ? '' : ` (${formatUsd(Number(value) * price)})`;
+  const pct = (value: number) => `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
+  const rows: Array<[string, string]> = [
+    ['Pool', `${token0.symbol}/${token1.symbol} ${fee} v3 · ${plan.pool.address}${plan.pool.tvlUsd !== undefined ? ` · TVL ${formatUsd(plan.pool.tvlUsd)}` : ''}`],
+    ['Price now', `${formatNumber(plan.price)} ${plan.unit}`],
+    ['Range', range.fullRange ? 'Full range (every price)' : `${formatNumber(range.lower)} – ${formatNumber(range.upper)} ${plan.unit} (${pct(range.lowerPct)} / ${pct(range.upperPct)}; ticks ${range.tickLower} to ${range.tickUpper}, spacing ${plan.pool.tickSpacing})`],
+    ['Deposit', `${([[deposit.amount0, token0], [deposit.amount1, token1]] as const).map(([value, info], side) => [value, info, deposit.nativeSide === side] as const)
+      .filter(([value]) => Number(value) > 0).map(([value, info, native]) => `${amount(value, native ? 'ETH' : info.symbol)}${usd(value, info.priceUsd)}`).join(' + ') || '0'}${deposit.valueUsd !== undefined ? ` = ${formatUsd(deposit.valueUsd)}` : ''}`],
+    ['Minimum', `${amount(deposit.min0, token0.symbol)}, ${amount(deposit.min1, token1.symbol)} (the mint reverts if the price moves further before it lands)`],
+    ['Wallet', `${plan.wallet}: ${amount(plan.wallets.balance0, token0.symbol)}, ${amount(plan.wallets.balance1, token1.symbol)}, ${amount(plan.wallets.native, 'ETH')}`],
+  ];
+  if (plan.volatility) {
+    const days = (value: number | undefined) => value === undefined ? undefined : value < 1 ? '<1 day' : `~${Math.round(value)} days`;
+    const reach = [days(plan.volatility.daysToLower) && `lower limit ${days(plan.volatility.daysToLower)}`, days(plan.volatility.daysToUpper) && `upper limit ${days(plan.volatility.daysToUpper)}`].filter(Boolean).join(', ');
+    rows.push(['Volatility', `±${plan.volatility.dailyPct.toFixed(1)}% a day over ${plan.volatility.days} days${reach ? `; a typical move reaches the ${reach}` : ''}`]);
+  }
+  const simulation = { passed: `passed${plan.simulation.tokenId ? ` (would mint #${plan.simulation.tokenId}` : ''}${plan.simulation.gas ? `, ~${Number(plan.simulation.gas).toLocaleString('en-US')} gas` : ''}${plan.simulation.tokenId ? ')' : ''}`,
+    failed: `failed: ${plan.simulation.message}`, 'after-approvals': 'after the approvals' }[plan.simulation.status];
+  rows.push(['Simulation', simulation], ['Deadline', `${plan.deadline.slice(0, 16).replace('T', ' ')} UTC (the mint reverts after this)`]);
+  const width = Math.max(...rows.map(([label]) => label.length));
+  console.log(`New Uniswap v3 position · ${CHAINS[plan.chainId].name} · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC\n`);
+  console.log(rows.map(([label, value]) => `${label.padEnd(width)}  ${value}`).join('\n'));
+  if (plan.warnings.length) console.log(`\nWarnings:\n${plan.warnings.map((warning) => `  ! ${warning}`).join('\n')}`);
+  console.log(`\n${plan.ready ? 'Transactions' : 'Transactions (not ready: fix the warnings above first)'}, in order, from ${plan.wallet}:`);
+  plan.transactions.forEach((transaction, index) => {
+    console.log(`\n${index + 1}. ${transaction.description}${transaction.value !== '0' ? ` (sends ${formatNumber(Number(transaction.value) / 1e18)} ETH)` : ''}`);
+    if (commands) console.log(`   ${commands[index]}`);
+    else console.log(`   to: ${transaction.to}\n   value: ${transaction.value}\n   data: ${transaction.data}`);
+  });
+  const notes = ['Nothing has been signed or sent. Sign each transaction with the wallet above, in order, waiting for each to confirm.'];
+  if (plan.simulation.status === 'after-approvals') notes.push('After the approvals confirm, run this command again: it rebuilds the mint at the latest price and simulates it.');
+  if (commands) notes.push('Check any step with: mm decode --payload <data>. --signer raw prints to/value/data for any other wallet.');
   console.log(`\n${notes.join('\n')}`);
 }

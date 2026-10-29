@@ -22,3 +22,18 @@ export async function usdPrices(tokens: Array<{ chainId: EvmChainId; address: st
   }
   return prices;
 }
+
+/** Daily USD prices over the last `days` days, oldest first, keyed like usdPrices; tokens without history are absent. */
+export async function dailyPrices(tokens: Array<{ chainId: EvmChainId; address: string }>, days: number, options: { endpoint?: string; fetcher?: typeof fetch } = {}): Promise<Map<string, number[]>> {
+  const keys = [...new Set(tokens.map((token) => `${chainNames[token.chainId]}:${token.address.toLowerCase()}`))];
+  const url = `${(options.endpoint ?? PRICES_URL).replace(/\/$/, '')}/chart/${keys.join(',')}?span=${days + 1}&period=1d`;
+  const body = await getJson(options.fetcher ?? fetch, url, 'DefiLlama prices', 20_000) as { coins?: Record<string, { prices?: Array<{ timestamp?: unknown; price?: unknown }> }> } | null;
+  const history = new Map<string, number[]>();
+  for (const [key, coin] of Object.entries(body?.coins ?? {})) {
+    const [chain, address] = key.split(':');
+    const chainId = Object.entries(chainNames).find(([, name]) => name === chain)?.[0];
+    const prices = (coin?.prices ?? []).map((point) => positive(point.price)).filter((price): price is number => price !== undefined);
+    if (chainId && address && prices.length) history.set(`${chainId}:${address.toLowerCase()}`, prices);
+  }
+  return history;
+}

@@ -13,7 +13,9 @@ import { DefiLlamaPoolsClient, defiLlamaListsChain } from './providers/defillama
 import { RpcProvider } from './providers/rpc.js';
 import { DexScreenerClient, normalizeAddress, similarTvl, type PoolDetails } from './providers/dexscreener.js';
 import { hooklessV4PoolId } from './providers/pool-address.js';
-import { poolDex, printPoolList, printPools, printPositions, printPositionTables, printWallets } from './output.js';
+import { poolDex, printCreatePlan, printPoolList, printPools, printPositions, printPositionTables, printWallets, type Signer } from './output.js';
+import { parseAmount, parseDeadline, parseLimit, planPosition } from './create-position.js';
+import { CREATE_CHAINS } from './providers/tokens.js';
 import { RevertClient } from './providers/revert.js';
 import { loadPortfolio, splitPositions, type PositionSource, type WalletGroup } from './positions.js';
 import { CHAINS, DEXES, POOL_SORTS, POOL_VERSIONS, isEvmChain, type AppConfig, type Dex, type EvmChainId, type PoolScore, type ChainId, type Pool, type PoolSort, type PoolVersion, type PositionAnalysis, type Protocol, type SavedWallet } from './types.js';
@@ -322,9 +324,10 @@ function parsePair(value: string): [string, string] {
   return [parts[0]!, parts[1]!];
 }
 
-const positions = app.command('positions').description('List your Uniswap LP positions (open and closed) or check their ranges.');
-commandHelp(positions, ['defi-tool positions list', 'defi-tool positions list --wallet wallet0', 'defi-tool positions list --wallet-addr 0xYourWallet --past', 'defi-tool positions analyze --wallet 0xYourWallet --chain eth'], [
+const positions = app.command('positions').description('List your Uniswap LP positions (open and closed), check their ranges, or plan a new one.');
+commandHelp(positions, ['defi-tool positions list', 'defi-tool positions create WETH/USDC --chain base --wallet main --amount 100usd --lower-limit -15% --upper-limit +10%', 'defi-tool positions list --wallet wallet0', 'defi-tool positions list --wallet-addr 0xYourWallet --past', 'defi-tool positions analyze --wallet 0xYourWallet --chain eth'], [
   'list shows open and closed positions with prices, ranges, balances, fees, APR and PnL. analyze checks range status only (used by alerts).',
+  'create builds the transactions for a new v3 position on Base or Arbitrum for your wallet to sign; it never signs or sends.',
   'Uses wallets saved with defi-tool wallet add (each on its network) or init, or pass --wallet; list also takes --wallet-addr. ls is an alias for list.',
 ]);
 positions.action(() => positions.outputHelp());
@@ -383,6 +386,68 @@ commandHelp(analyze, ['defi-tool positions analyze', 'defi-tool positions analyz
   'Public RPC defaults are included; custom RPC_URL_* values are optional. Zero-liquidity NFTs are skipped.',
   'RPC-only reads provide range status and liquidity; USD value, amounts, and earned fees are not computed.',
 ]);
+
+const create = positions.command('create')
+  .description('Plan a new Uniswap v3 position and build its transactions for your wallet to sign. Nothing is signed or sent.')
+  .argument('[pair]', 'two tokens joined by /, e.g. WETH/USDC (symbols or addresses; ETH means WETH)')
+  .requiredOption('--chain <name>', `network: ${CREATE_CHAINS.map((chain) => CHAINS[chain].slug).join(' or ')}`)
+  .requiredOption('--wallet <name|address>', 'saved wallet name or 0x address that will sign, pay and receive the position NFT')
+  .requiredOption('--amount <amount>', 'deposit: a USD total (100usd, $100), one token\'s amount (0.05weth, 150usdc; the other token follows from the range), or max')
+  .option('--lower-limit <limit>', 'lower end of the range: percent from the current price (-15%) or a price in the shown unit (2100)')
+  .option('--upper-limit <limit>', 'upper end of the range: percent from the current price (+10%) or a price (2600)')
+  .option('--full-range', 'provide liquidity at every price instead of --lower-limit/--upper-limit')
+  .option('--fee <percent>', 'fee tier in percent: 0.01, 0.05, 0.3 or 1 (default: the pool with the most liquidity)')
+  .option('--pool <address>', 'a v3 pool address instead of the pair and --fee')
+  .option('--slippage <percent>', 'price move tolerated before the mint lands, in percent (default: 0.5)', '0.5')
+  .option('--deadline <time>', 'how long the mint stays valid after it is built, e.g. 20m or 1h (default: 20m)', '20m')
+  .addOption(choiceOption('--pay-with <token>', 'auto = WETH, or native ETH when the wallet lacks WETH; weth; eth', ['auto', 'weth', 'eth']).default('auto'))
+  .addOption(choiceOption('--approve <amount>', 'exact = approve only what this mint needs (safer); unlimited', ['exact', 'unlimited']).default('exact'))
+  .addOption(choiceOption('--signer <wallet>', 'mm = print MetaMask agent wallet (mm) commands; raw = print to/value/data for any wallet', ['mm', 'raw']).default('mm'))
+  .option('--json', 'print the plan as JSON');
+commandHelp(create, [
+  'defi-tool positions create WETH/USDC --chain base --wallet my-wallet --amount 100usd --lower-limit -15% --upper-limit +10%',
+  'defi-tool positions create WETH/USDC --chain arb --fee 0.05 --wallet 0xYourWallet --amount 0.05weth --lower-limit 2000 --upper-limit 2700',
+  'defi-tool positions create cbBTC/USDC --chain base --wallet my-wallet --amount max --lower-limit -20% --upper-limit +20% --signer raw',
+  'defi-tool positions create --pool 0xd0b53d9277642d899df5c87a3966a349a798f224 --chain base --wallet my-wallet --amount 50usd --full-range --json',
+], [
+  'Read-only: the command reads the pool and wallet on-chain, then prints the approve and mint transactions to sign, in order. It never signs or sends.',
+  'Limits need not be symmetric. Percentages are from the current price in the unit shown (e.g. USDC per WETH); ticks are widened to the pool\'s tick spacing.',
+  'Approvals are only added when the allowance is short. After signing them, run the command again so the mint uses the latest price and is simulated first.',
+  'The mint is simulated from your wallet when it can run now; a failing simulation shows the revert reason. Minimum amounts protect against --slippage.',
+  'A volatility check from 30 days of prices estimates how soon a typical move leaves the range. Only Base and Arbitrum, Uniswap v3, for now.',
+  'Ledger wallet-cli cannot send contract calls on Base or Arbitrum; use mm, or --signer raw with a wallet that can.',
+]);
+create.action(async (pair: string | undefined, options: { chain: string; wallet: string; amount: string; lowerLimit?: string; upperLimit?: string; fullRange?: boolean; fee?: string; pool?: string; slippage: string; deadline: string; payWith: 'auto' | 'weth' | 'eth'; approve: 'exact' | 'unlimited'; signer: Signer; json?: boolean }) => {
+  const config = await loadConfig(configPath());
+  const chainId = parseWalletChain(options.chain);
+  if (!isEvmChain(chainId) || !CREATE_CHAINS.includes(chainId)) throw new Error(`positions create supports ${CREATE_CHAINS.map((chain) => CHAINS[chain].name).join(' and ')} for now.`);
+  if (Boolean(pair) === Boolean(options.pool)) throw new Error('Give a pair such as WETH/USDC, or --pool <address>, but not both.');
+  if (options.pool && !/^0x[0-9a-fA-F]{40}$/.test(options.pool)) throw new Error('--pool must be a 0x pool address.');
+  if (options.fee !== undefined && options.pool) throw new Error('--fee is implied by --pool; leave it out.');
+  const fees: Record<string, number> = { '0.01': 100, '0.05': 500, '0.3': 3000, '0.30': 3000, '1': 10_000, '1.0': 10_000 };
+  const feeTier = options.fee === undefined ? undefined : fees[options.fee.trim().replace(/%$/, '')];
+  if (options.fee !== undefined && feeTier === undefined) throw new Error(`--fee "${options.fee}" is not a Uniswap v3 tier: use 0.01, 0.05, 0.3 or 1.`);
+  if (options.fullRange && (options.lowerLimit || options.upperLimit)) throw new Error('Use --full-range or --lower-limit/--upper-limit, not both.');
+  if (!options.fullRange && (!options.lowerLimit || !options.upperLimit)) throw new Error('Give both --lower-limit and --upper-limit (e.g. --lower-limit -15% --upper-limit +10%), or --full-range.');
+  const slippage = Number(options.slippage.replace(/%$/, ''));
+  if (!(slippage > 0 && slippage <= 50)) throw new Error('--slippage must be a percentage above 0 and at most 50, e.g. 0.5.');
+  const store = new Store(config.databasePath);
+  let wallet: string;
+  try {
+    const saved = store.wallet(options.wallet);
+    if (saved && !isEvmChain(saved.chainId)) throw new Error(`Saved wallet "${saved.name}" is a Solana wallet; positions are on EVM networks.`);
+    wallet = saved?.address ?? options.wallet.trim();
+  } finally { store.close(); }
+  if (!/^0x[0-9a-fA-F]{40}$/.test(wallet)) throw new Error(`--wallet "${options.wallet}" is neither a saved wallet name nor a 0x address.`);
+  const plan = await planPosition({
+    chainId, pair: pair ? parsePair(pair) : undefined, pool: options.pool, feeTier,
+    lower: options.lowerLimit ? parseLimit(options.lowerLimit, '--lower-limit') : undefined,
+    upper: options.upperLimit ? parseLimit(options.upperLimit, '--upper-limit') : undefined,
+    fullRange: options.fullRange, amount: parseAmount(options.amount), wallet, slippage: slippage / 100,
+    deadlineSeconds: parseDeadline(options.deadline), payWith: options.payWith, approve: options.approve, pricesUrl: process.env.DEFI_TOOL_PRICES_URL,
+  }, new RpcProvider(config.rpcUrls), (message) => console.error(message));
+  printCreatePlan(plan, { json: Boolean(options.json), signer: options.signer });
+});
 
 const alerts = app.command('alerts').description('Check and persist actionable position alerts.');
 commandHelp(alerts, ['defi-tool alerts check', 'defi-tool alerts check --wallet 0xYourWallet --chain eth', 'defi-tool alerts check --help'], [
