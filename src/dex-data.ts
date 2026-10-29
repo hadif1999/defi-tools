@@ -173,6 +173,28 @@ export async function findPools(client: GeckoTerminalClient, chainId: ChainId, q
 }
 
 /**
+ * The deepest pool trading a pair on any of the networks, and the next three as alternatives. A network that cannot be
+ * searched is reported through `onError` and skipped; no match anywhere is an error naming the filters.
+ */
+export async function resolvePool(client: GeckoTerminalClient, text: string, chains: ChainId[], filters: Omit<PoolQuery, 'pair'>,
+  hooks: { onSearch?: (chainId: ChainId) => void; onError?: (chainId: ChainId, error: Error) => void } = {}): Promise<{ pool: GeckoPool; alternatives: GeckoPool[] }> {
+  const parts = text.split('/').map((part) => part.trim());
+  if (parts.length !== 2 || parts.some((part) => !part)) throw new Error(`Pair "${text}" needs two tokens joined by /, e.g. WETH/USDC.`);
+  const found: GeckoPool[] = [];
+  for (const chain of chains) {
+    hooks.onSearch?.(chain);
+    try { found.push(...await findPools(client, chain, { ...filters, pair: [parts[0]!, parts[1]!] })); }
+    catch (error) { hooks.onError?.(chain, error as Error); }
+  }
+  found.sort((a, b) => (b.tvlUsd ?? 0) - (a.tvlUsd ?? 0));
+  if (!found.length) {
+    const fee = filters.feeTier === undefined ? '' : ` at ${filters.feeTier / 10_000}%`;
+    throw new Error(`No ${filters.versions.join('/')} pool on ${filters.dexes.join('/')}${fee} trades ${text} on ${chains.map((chain) => CHAINS[chain].name).join(', ')}. Try other --chain, --dex, --protocol or --fee values.`);
+  }
+  return { pool: found[0]!, alternatives: found.slice(1, 4) };
+}
+
+/**
  * Which token to price and in what. "auto" quotes in the more money-like token, as positions list does (stablecoin,
  * then the native coin, then BTC; otherwise GeckoTerminal's quote token); "usd" prices the other token in US dollars;
  * a symbol or address names the quote token.

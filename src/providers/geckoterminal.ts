@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ChainId, Dex, PoolVersion } from '../types.js';
-import { feeTierFromPercent, getJson, nonnegative, retryRateLimit } from './http.js';
+import { feeTierFromPercent, getJson, nonnegative, positive, retryRateLimit } from './http.js';
 import { PUBLIC_POOLS_URL } from './public-pools.js';
 
 // Public REST API: https://apiguide.geckoterminal.com/ (about 30 requests a minute, no key).
@@ -41,6 +41,17 @@ export interface GeckoPool {
   quote: GeckoToken;
   tvlUsd?: number;
   createdAt?: string;
+  /** Prices and 24h activity at the time of the request. */
+  market?: {
+    /** One base token in quote tokens, and the reverse. */
+    baseInQuote?: number;
+    quoteInBase?: number;
+    baseUsd?: number;
+    quoteUsd?: number;
+    volume24hUsd?: number;
+    /** Swaps in the last 24h (buys plus sells). */
+    trades24h?: number;
+  };
 }
 
 /**
@@ -58,9 +69,21 @@ export function classifyDex(dexId: string): { dex: Dex; version: PoolVersion } |
   return undefined;
 }
 
+const trades = (h24: { buys?: unknown; sells?: unknown } | null | undefined): number | undefined => {
+  const buys = nonnegative(h24?.buys);
+  const sells = nonnegative(h24?.sells);
+  return buys === undefined && sells === undefined ? undefined : (buys ?? 0) + (sells ?? 0);
+};
+
 const reference = z.object({ data: z.object({ id: z.string() }) });
 const poolResource = z.object({
-  attributes: z.object({ address: z.string(), name: z.string(), reserve_in_usd: z.unknown().optional(), pool_created_at: z.string().nullish() }),
+  attributes: z.object({
+    address: z.string(), name: z.string(), reserve_in_usd: z.unknown().optional(), pool_created_at: z.string().nullish(),
+    base_token_price_quote_token: z.unknown().optional(), quote_token_price_base_token: z.unknown().optional(),
+    base_token_price_usd: z.unknown().optional(), quote_token_price_usd: z.unknown().optional(),
+    volume_usd: z.object({ h24: z.unknown().optional() }).partial().nullish(),
+    transactions: z.object({ h24: z.object({ buys: z.unknown().optional(), sells: z.unknown().optional() }).nullish() }).partial().nullish(),
+  }),
   relationships: z.object({ base_token: reference, quote_token: reference, dex: reference }),
 });
 const included = z.array(z.object({ id: z.string(), type: z.string(), attributes: z.record(z.unknown()) })).default([]);
@@ -118,6 +141,12 @@ export class GeckoTerminalClient {
         feeTier: fee === undefined ? undefined : feeTierFromPercent(fee),
         base: token(item.relationships.base_token.data.id), quote: token(item.relationships.quote_token.data.id),
         tvlUsd: nonnegative(item.attributes.reserve_in_usd), createdAt: item.attributes.pool_created_at ?? undefined,
+        market: {
+          baseInQuote: positive(item.attributes.base_token_price_quote_token), quoteInBase: positive(item.attributes.quote_token_price_base_token),
+          baseUsd: positive(item.attributes.base_token_price_usd), quoteUsd: positive(item.attributes.quote_token_price_usd),
+          volume24hUsd: nonnegative(item.attributes.volume_usd?.h24),
+          trades24h: trades(item.attributes.transactions?.h24),
+        },
       };
     });
   }

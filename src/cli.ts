@@ -14,7 +14,7 @@ import { DefiLlamaPoolsClient, defiLlamaListsChain } from './providers/defillama
 import { RpcProvider } from './providers/rpc.js';
 import { DexScreenerClient, normalizeAddress, similarTvl, type PoolDetails } from './providers/dexscreener.js';
 import { hooklessV4PoolId } from './providers/pool-address.js';
-import { poolDex, printCreatePlan, printHistory, printDexDownloads, printMarketDownloads, printPoolList, printPools, printPositions, printPositionTables, printWallets, type DexDownload, type MarketDownload, type Signer } from './output.js';
+import { poolDex, printCreatePlan, printHistory, formatTickerLine, printDexDownloads, printMarketDownloads, renderTickerScreen, printPoolList, printPools, printPositions, printPositionTables, printWallets, type DexDownload, type MarketDownload, type Signer } from './output.js';
 import { parseAmount, parseDeadline, parseLimit, planPosition } from './create-position.js';
 import { CREATE_CHAINS } from './providers/tokens.js';
 import { walletBalances } from './providers/balances.js';
@@ -24,7 +24,8 @@ import { RevertClient } from './providers/revert.js';
 import { loadPortfolio, splitPositions, type PositionSource, type WalletGroup } from './positions.js';
 import { GECKO_TIMEFRAMES, GeckoTerminalClient, OHLCV_PAGE, type GeckoPool, type Timeframe } from './providers/geckoterminal.js';
 import { feeTierFromPercent } from './providers/http.js';
-import { candleRange, cleanCandles, datasetFileName, downloadCandles, findPools, priceUnit, writeDataset, MAX_HISTORY_DAYS, type DexDataset } from './dex-data.js';
+import { candleRange, cleanCandles, datasetFileName, downloadCandles, priceUnit, resolvePool, writeDataset, MAX_HISTORY_DAYS, type DexDataset } from './dex-data.js';
+import { parseInterval, TickerFeed, tickerJson, watchTicker } from './dex-ticker.js';
 import { autoSample, buildCandles, coverage, sampleCandidates, sampleRequests, downloadSamples, marketFileName, marketRange, parseMarketPair, resolveCoin, writeMarketData, MARKET_TIMEFRAMES, SAMPLE_PERIODS, type Coin, type MarketDataset, type MarketTimeframe, type SamplePeriod } from './market-data.js';
 import { searchCoins } from './providers/coingecko.js';
 import { coinSymbols } from './providers/prices.js';
@@ -39,7 +40,7 @@ const app = new Command().name('defi-tool')
   .configureHelp({ showGlobalOptions: true }).showSuggestionAfterError(true)
   .showHelpAfterError('Run defi-tool --help, or add --help after any command for examples.');
 const configPath = (): string => app.opts().config ?? process.env.DEFI_TOOL_CONFIG ?? DEFAULT_CONFIG_PATH;
-commandHelp(app, ['defi-tool init', 'defi-tool chains', 'defi-tool pools scan --chain eth', 'defi-tool pools get WSOL/USDC', 'defi-tool wallet add 0xYourWallet --chain eth --name main', 'defi-tool positions list --wallet main', 'defi-tool dex-data download WETH/USDC --chain base', 'defi-tool market-data download ETH,BTC/ETH'], [
+commandHelp(app, ['defi-tool init', 'defi-tool chains', 'defi-tool pools scan --chain eth', 'defi-tool pools get WSOL/USDC', 'defi-tool wallet add 0xYourWallet --chain eth --name main', 'defi-tool positions list --wallet main', 'defi-tool dex-data download WETH/USDC --chain base', 'defi-tool market-data download ETH,BTC/ETH', 'defi-tool dex-ticker WETH/USDC --chain base --watch'], [
   'No API key or setup is needed for public data. wallet add saves wallets by name; init optionally saves networks and settings.',
   'Add --help to any command, e.g. defi-tool positions analyze --help.',
   `Use --json on data commands for scripts. Chain names: ${Object.values(CHAINS).map((chain) => chain.slug).join(', ')}, all.`,
@@ -824,16 +825,10 @@ download.action(async (pairsArg: string | undefined, options: {
   } else {
     for (const text of pairsArg!.split(',').map((item) => item.trim()).filter(Boolean)) {
       try {
-        const pair = parsePair(text);
-        const found: GeckoPool[] = [];
-        for (const chain of chains) {
-          progress(`Finding ${text} on ${CHAINS[chain].name}…`);
-          try { found.push(...await findPools(client, chain, { pair, dexes: options.dex, versions: options.protocol, feeTier })); }
-          catch (error) { console.error(`\n${text} on ${CHAINS[chain].name}: ${(error as Error).message}`); }
-        }
-        found.sort((a, b) => (b.tvlUsd ?? 0) - (a.tvlUsd ?? 0));
-        if (!found.length) throw new Error(`No ${options.protocol.join('/')} pool on ${options.dex.join('/')}${feeTier === undefined ? '' : ` at ${options.fee}%`} trades ${text} on ${chains.map((chain) => CHAINS[chain].name).join(', ')}. Try other --chain, --dex, --protocol or --fee values.`);
-        targets.push({ label: text, pool: found[0], alternatives: found.slice(1, 4) });
+        targets.push({ label: text, ...await resolvePool(client, text, chains, { dexes: options.dex, versions: options.protocol, feeTier }, {
+          onSearch: (chain) => progress(`Finding ${text} on ${CHAINS[chain].name}…`),
+          onError: (chain, error) => console.error(`\n${text} on ${CHAINS[chain].name}: ${error.message}`),
+        }) });
       } catch (error) { targets.push({ label: text, alternatives: [], error: (error as Error).message }); }
     }
   }
@@ -967,6 +962,74 @@ marketDownload.action(async (pairsArg: string, options: {
   progress('');
   printMarketDownloads(results, { json: Boolean(options.json), dryRun: Boolean(options.dryRun), timeframe: options.timeframe, from: range.start, to: range.end });
   if (results.every((result) => result.error)) process.exitCode = 1;
+});
+
+const dexTicker = app.command('dex-ticker')
+  .description('Show a DEX pool\'s ticker: price, 24h change, high, low, volume and liquidity. Add --watch for a live view.')
+  .argument('[pair]', 'two tokens joined by /, e.g. WETH/USDC: symbols or addresses, in either order')
+  .option('--chain <names>', 'networks to search, e.g. base or eth,arb (default: saved chains); the deepest matching pool is used')
+  .addOption(new Option('--dex <names>', `exchanges to consider, comma-separated: ${DEXES.join(', ')}, or all`)
+    .argParser((value: string) => { try { return parseDexes(value); } catch (error) { throw new InvalidArgumentError((error as Error).message); } })
+    .default(['uniswap'], 'uniswap'))
+  .addOption(new Option('--protocol <versions>', 'pool types to consider, comma-separated: v2, v3, v4, clmm, amm, or all')
+    .argParser((value: string) => { try { return parsePoolVersions(value); } catch (error) { throw new InvalidArgumentError((error as Error).message); } })
+    .default(['v3'], 'v3'))
+  .option('--fee <percent>', 'fee tier in percent, e.g. 0.05 or 0.3 (default: the deepest pool, any tier)')
+  .option('--pool <address>', 'a pool address or v4 pool ID instead of a pair (needs a single --chain)')
+  .option('--quote <token>', 'price unit: auto (stablecoin, then native coin), usd, or one of the pair\'s tokens', 'auto')
+  .option('--watch', 'keep the ticker on screen and update it live; q or Ctrl+C quits')
+  .option('--interval <duration>', 'time between updates with --watch, at least 5s (e.g. 10s, 1m)', '10s')
+  .option('--count <n>', 'with --watch, stop after this many updates')
+  .option('--no-color', 'plain text without colors (NO_COLOR also works)')
+  .option('--json', 'print JSON: one object, or one per line with --watch');
+commandHelp(dexTicker, [
+  'defi-tool dex-ticker WETH/USDC --chain base',
+  'defi-tool dex-ticker WETH/USDC --chain base --fee 0.05 --watch',
+  'defi-tool dex-ticker cbBTC/USDC --chain base --watch --interval 30s',
+  'defi-tool dex-ticker SOL/USDC --chain solana --dex raydium --protocol clmm --quote usd',
+  'defi-tool dex-ticker --pool 0xd0b53d9277642d899df5c87a3966a349a798f224 --chain base --json',
+  'defi-tool dex-ticker WETH/USDC --chain arb --watch --json --count 6 > ticks.jsonl',
+], [
+  'Data comes from GeckoTerminal\'s public API, without a key. Its pool prices refresh about every 10-60 seconds, so updates faster than that repeat the same price.',
+  'Price is the pool\'s own price, in the more money-like token (USDC per WETH) unless --quote says otherwise. 24h change, high and low come from the pool\'s 15-minute candles in the same unit, refreshed every minute; volume and liquidity are in USD.',
+  'Without --watch, it prints one line and exits. With --watch in a terminal, it takes over the screen and redraws in place; piped or redirected, it prints a line per update instead.',
+  'Each update uses one request (two when the 24h figures refresh). GeckoTerminal allows about 30 a minute, so --interval is at least 5s; failed updates keep the last figures and retry with growing waits.',
+  'Pool choice works as in dex-data: the deepest pool matching --dex, --protocol and --fee on the --chain networks.',
+]);
+dexTicker.action(async (pairArg: string | undefined, options: {
+  chain?: string; dex: Dex[]; protocol: PoolVersion[]; fee?: string; pool?: string; quote: string; watch?: boolean; interval: string; count?: string; color: boolean; json?: boolean;
+}) => {
+  if (pairArg && options.pool) throw new Error('Give either a pair or --pool, not both.');
+  if (!pairArg && !options.pool) throw new Error('Name a pair, e.g. defi-tool dex-ticker WETH/USDC --chain base, or use --pool.');
+  if (!options.watch && (options.count !== undefined || dexTicker.getOptionValueSource('interval') === 'cli')) throw new Error('--interval and --count only apply with --watch.');
+  const intervalMs = parseInterval(options.interval);
+  const count = parsePositiveInt(options.count, '--count');
+  const config = await loadConfig(configPath());
+  const chains = parseChains(options.chain) ?? config.chains;
+  const feeTier = options.fee === undefined ? undefined : feeTierFromPercent(`${options.fee.replace(/%$/, '')}%`);
+  if (options.fee !== undefined && feeTier === undefined) throw new Error(`--fee "${options.fee}" is not a fee tier. Use a percentage such as 0.01, 0.05, 0.3 or 1.`);
+  const client = new GeckoTerminalClient({ endpoint: process.env.DEFI_TOOL_GECKOTERMINAL_URL });
+  let pool: GeckoPool;
+  if (options.pool) {
+    if (chains.length !== 1) throw new Error('--pool needs exactly one network, e.g. --chain base.');
+    pool = await client.pool(chains[0]!, options.pool.trim());
+  } else {
+    pool = (await resolvePool(client, pairArg!, chains, { dexes: options.dex, versions: options.protocol, feeTier }, {
+      onError: (chain, error) => console.error(`${pairArg} on ${CHAINS[chain].name}: ${error.message}`),
+    })).pool;
+  }
+  const feed = new TickerFeed(client, pool, options.quote);
+  const color = options.color && !process.env.NO_COLOR && Boolean(process.stdout.isTTY);
+  if (!options.watch) {
+    const ticker = await feed.read();
+    console.log(options.json ? JSON.stringify(tickerJson(ticker), null, 2) : formatTickerLine(ticker, color));
+    return;
+  }
+  const updates = await watchTicker(feed, { intervalMs, count, json: Boolean(options.json), color }, {
+    write: (text) => process.stdout.write(text), error: (text) => process.stderr.write(text), tty: Boolean(process.stdout.isTTY),
+    input: process.stdin, render: renderTickerScreen, line: formatTickerLine,
+  });
+  if (!updates) process.exitCode = 1;
 });
 
 const help = app.command('help [command...]').description('Show help for any command or subcommand.');

@@ -7,6 +7,7 @@ import type { CreatePlan, PlanTransaction } from './create-position.js';
 import { CHAINS, type SavedWallet } from './types.js';
 import type { GeckoPool } from './providers/geckoterminal.js';
 import type { DexDataset } from './dex-data.js';
+import type { Ticker } from './dex-ticker.js';
 import { MARKET_TIMEFRAMES, SAMPLE_PERIODS, type MarketDataset } from './market-data.js';
 
 const MISSING = '—';
@@ -512,4 +513,52 @@ export function printMarketDownloads(results: MarketDownload[], options: { json:
     }
   }
   for (const result of results.filter((item) => item.error)) console.error(`${result.label}: ${result.error}`);
+}
+
+/** ANSI colors for the ticker, or plain text when color is off (NO_COLOR, not a terminal). */
+export function palette(enabled: boolean) {
+  const wrap = (code: string) => (text: string) => enabled ? `\x1b[${code}m${text}\x1b[0m` : text;
+  return { green: wrap('32'), red: wrap('31'), bold: wrap('1'), dim: wrap('2') };
+}
+
+const signedPercent = (value: number | undefined) => value === undefined || !Number.isFinite(value) ? MISSING : `${value > 0 ? '+' : ''}${value.toFixed(2)}%`;
+const tickerPool = (ticker: Ticker) => `${ticker.pool.dex ? ticker.pool.dex[0]!.toUpperCase() + ticker.pool.dex.slice(1) : ticker.pool.dexId}${ticker.pool.version ? ` ${ticker.pool.version}` : ''}${ticker.pool.feeTier === undefined ? '' : ` ${ticker.pool.feeTier / 10_000}%`}`;
+
+/** One line, like an exchange ticker: pair, price, 24h change, high, low, volume, liquidity, and the pool. */
+export function formatTickerLine(ticker: Ticker, color = false): string {
+  const paint = palette(color);
+  const change = ticker.change24hPct === undefined ? MISSING : (ticker.change24hPct >= 0 ? paint.green : paint.red)(signedPercent(ticker.change24hPct));
+  return [
+    paint.bold(ticker.pair), `${paint.bold(formatNumber(ticker.price))} ${ticker.priceUnit}`, `24h ${change}`,
+    `H ${formatNumber(ticker.high24h)}`, `L ${formatNumber(ticker.low24h)}`, `Vol ${formatUsd(ticker.volume24hUsd)}`, `Liq ${formatUsd(ticker.liquidityUsd)}`,
+    paint.dim(`${tickerPool(ticker)} on ${CHAINS[ticker.pool.chainId].name}`),
+  ].join('  ');
+}
+
+/**
+ * The --watch screen: the price large and colored by its last move, the 24h figures below, and a status line with
+ * the update time, interval and any error from the latest attempt (the last good figures stay on screen).
+ */
+export function renderTickerScreen(ticker: Ticker, previous: Ticker | undefined, status: { intervalMs: number; error?: string; color: boolean }): string {
+  const paint = palette(status.color);
+  const move = previous ? ticker.price - previous.price : 0;
+  const tint = move > 0 ? paint.green : move < 0 ? paint.red : (text: string) => text;
+  const arrow = move > 0 ? '▲' : move < 0 ? '▼' : '•';
+  const change = ticker.change24hPct === undefined ? MISSING : (ticker.change24hPct >= 0 ? paint.green : paint.red)(signedPercent(ticker.change24hPct));
+  const address = `${ticker.pool.address.slice(0, 6)}…${ticker.pool.address.slice(-4)}`;
+  const time = new Date(ticker.updatedAt).toLocaleTimeString('en-GB', { hour12: false });
+  const rows: Array<[string, string]> = [
+    ['24h change', change], ['24h high', formatNumber(ticker.high24h)], ['24h low', formatNumber(ticker.low24h)],
+    ['24h volume', formatUsd(ticker.volume24hUsd)], ['Liquidity', formatUsd(ticker.liquidityUsd)], ['24h trades', ticker.trades24h === undefined ? MISSING : ticker.trades24h.toLocaleString('en-US')],
+  ];
+  return [
+    `${paint.bold(ticker.pair)}  ${paint.dim(`${tickerPool(ticker)} · ${CHAINS[ticker.pool.chainId].name} · ${address}`)}`,
+    '',
+    `  ${tint(paint.bold(`${arrow} ${formatNumber(ticker.price)}`))} ${ticker.priceUnit}${previous && move ? `  ${tint(`${move > 0 ? '+' : ''}${formatNumber(move)}`)}` : ''}`,
+    '',
+    ...rows.map(([label, value]) => `  ${label.padEnd(11)} ${value}`),
+    '',
+    paint.dim(`Updated ${time} · every ${status.intervalMs / 1000}s · GeckoTerminal · q or Ctrl+C to quit`),
+    ...(status.error ? [paint.red(`Last update failed: ${status.error} Showing the previous figures; retrying.`)] : []),
+  ].join('\n');
 }

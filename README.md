@@ -1,6 +1,6 @@
 # defi-tool
 
-A read-only DeFi CLI: pool discovery and ranking for Uniswap, PancakeSwap, Aerodrome and Curve (EVM chains) and Raydium (Solana), Uniswap LP position analysis and on-demand alerts, historical price candles for any of those pools and for the market as a whole, and transaction plans for new Uniswap v3 positions that your own wallet signs.
+A read-only DeFi CLI: pool discovery and ranking for Uniswap, PancakeSwap, Aerodrome and Curve (EVM chains) and Raydium (Solana), Uniswap LP position analysis and on-demand alerts, historical price candles for any of those pools and for the market as a whole, a live pool ticker, and transaction plans for new Uniswap v3 positions that your own wallet signs.
 
 **No Uniswap API key is needed.** Pool listings use DefiLlama's public yields API (GeckoTerminal is available as an alternative); position checks and alerts use public chain RPCs. A custom provider is optional.
 
@@ -31,6 +31,7 @@ defi-tool positions create --help
 defi-tool alerts check --help
 defi-tool dex-data download --help
 defi-tool market-data download --help
+defi-tool dex-ticker --help
 defi-tool init --help
 ```
 
@@ -264,6 +265,30 @@ Source: DefiLlama blended prices (no key) · coins found on CoinGecko
 - **Sampling:** `--sample auto` (default) uses the widest spacing that still gives about 12 samples per candle (5m for 1h candles, 15m for 4h, 1h for 12h and 1d, 4h for 1w). When fewer than 90% of periods get samples, as for coins DefiLlama keeps less often, it retries at the next coarser spacing that fits in a candle and keeps the fullest result. `--sample 5m|15m|1h|4h|1d` fixes the spacing.
 - **Checks:** malformed and zero prices, duplicate samples, and samples outside the range are left out and counted. Periods without samples are filled with the previous close (`samples=0`, `filled=true`) unless `--fill none`; periods before the first sample are never filled. The summary reports **Thin** candles (under half the usual samples), **jumps** (closes over 50% from the previous close), DefiLlama's **confidence** score per coin (below 0.9 is flagged), a large share of filled candles, and few samples per candle.
 - **Time, files and options** work as in `dex-data`: `--from` (default `30d`) and `--to` (default `now`), finished periods only unless `--include-partial`, `--format csv|json|jsonl|parquet`, `--out-dir` (default `./market-data`), a `.meta.json` beside each file (pair, coin keys, method, sample spacing, range, requests and every check), `--force`, `--json`. Columns: `time`, `timestamp`, `open`, `high`, `low`, `close`, `samples`, `filled`. Files are named like `BTC-ETH_1h_20260929-1900_20261029-1800.csv`.
+
+## DEX ticker
+
+`dex-ticker` shows a DEX pool's ticker, like an exchange app: price, 24h change, 24h high and low, 24h volume and liquidity. It prints one line and exits; `--watch` keeps it on screen and updates it live.
+
+```bash
+defi-tool dex-ticker WETH/USDC --chain base
+defi-tool dex-ticker WETH/USDC --chain base --fee 0.05 --watch
+defi-tool dex-ticker cbBTC/USDC --chain base --watch --interval 30s
+defi-tool dex-ticker SOL/USDC --chain solana --dex raydium --protocol clmm --quote usd
+defi-tool dex-ticker --pool 0xd0b53d9277642d899df5c87a3966a349a798f224 --chain base --json
+defi-tool dex-ticker WETH/USDC --chain arb --watch --json --count 6 > ticks.jsonl
+```
+
+```text
+$ defi-tool dex-ticker WETH/USDC --chain base --fee 0.05
+WETH/USDC  2,322.12 USDC per WETH  24h -1.42%  H 2,390.19  L 2,291.41  Vol $12.9M  Liq $8.3M  Uniswap v3 0.05% on Base
+```
+
+- **Pool:** chosen as in `dex-data`: the deepest pool matching `--dex` (default `uniswap`), `--protocol` (default `v3`) and `--fee` on the `--chain` networks (default: saved chains), or `--pool <address>` with one `--chain`. The pair is written BASE/QUOTE, as exchanges do: `WETH/USDC` is priced in USDC per WETH.
+- **Figures:** the price is the pool's own price, in the more money-like token (`--quote auto`), in USD (`--quote usd`), or in a token you name. 24h change, high and low come from the pool's 15-minute candles in the same unit: change against the last close at least 24 hours old, high and low over the day, widened by the live price between candle reads. Volume, liquidity and the 24h trade count are GeckoTerminal's, in USD.
+- **`--watch`:** in a terminal, the ticker takes over the screen (alternate screen, cursor hidden) and redraws in place every `--interval` (default `10s`, at least `5s`). The price is green or red after a rise or fall, with an arrow and the move. `q` or Ctrl+C quits, restores the terminal, and leaves the last ticker line on screen. A failed update keeps the last figures on screen with the error and retries, waiting longer after repeated failures (up to a minute). Piped or redirected, `--watch` prints a line per update instead, or one JSON object per line with `--json`. `--count <n>` stops after n updates.
+- **Source and limits:** GeckoTerminal's public API, without a key. It refreshes pool prices about every 10–60 seconds, so a faster `--interval` repeats prices. Each update takes one request; the 24h candles are refreshed once a minute (one more request). GeckoTerminal allows about 30 requests a minute, and rate limits are waited out.
+- `--json` prints the pool, price unit and every figure unformatted, plus `updatedAt`. `--no-color` or `NO_COLOR` turns colors off; they are also off when the output is not a terminal.
 
 ## Configuration
 

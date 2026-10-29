@@ -20,12 +20,12 @@ function run(args: string[], config = '/nonexistent/defi-tool-test/config.json')
 }
 
 test('root, groups, and subcommands explain themselves without a config or network', () => {
-  for (const path of [[], ['help'], ['pools'], ['positions'], ['alerts'], ['init'], ['chains'], ['pools', 'scan'], ['pools', 'get'], ['pools', 'rank'], ['positions', 'analyze'], ['positions', 'list'], ['positions', 'create'], ['wallet', 'history'], ['alerts', 'check'], ['wallet'], ['wallet', 'add'], ['wallet', 'list'], ['wallet', 'edit'], ['wallet', 'delete'], ['dex-data'], ['dex-data', 'download'], ['market-data'], ['market-data', 'download']]) {
+  for (const path of [[], ['help'], ['pools'], ['positions'], ['alerts'], ['init'], ['chains'], ['pools', 'scan'], ['pools', 'get'], ['pools', 'rank'], ['positions', 'analyze'], ['positions', 'list'], ['positions', 'create'], ['wallet', 'history'], ['alerts', 'check'], ['wallet'], ['wallet', 'add'], ['wallet', 'list'], ['wallet', 'edit'], ['wallet', 'delete'], ['dex-data'], ['dex-data', 'download'], ['market-data'], ['market-data', 'download'], ['dex-ticker']]) {
     const result = run([...path, '--help']);
     assert.equal(result.status, 0, `${path}: ${result.stderr}`);
     assert.match(result.stdout, /defi-tool\b/);
     assert.match(result.stdout, /Examples:/);
-    assert.match(result.stdout, /defi-tool (help|init|chains|pools|positions|alerts|wallet|dex-data|market-data)/);
+    assert.match(result.stdout, /defi-tool (help|init|chains|pools|positions|alerts|wallet|dex-data|market-data|dex-ticker)/);
   }
   for (const path of [[], ['pools'], ['positions'], ['alerts'], ['wallet'], ['dex-data'], ['market-data']]) {
     const result = run(path);
