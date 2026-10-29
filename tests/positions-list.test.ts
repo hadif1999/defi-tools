@@ -63,9 +63,6 @@ test('positions list shows open and closed positions as two tables, by saved wal
     assert.match(everything.stdout, /ledger \(0x902e…3f00\) on Base/);
     assert.match(everything.stderr, /Note: skipping phantom \(Solana\)/);
     assert.equal(requests.filter((url) => url.includes('uniswapv3')).length, 6); // One request per address and run.
-    // The open position is recorded for wallet list.
-    const wallets = JSON.parse(sync('wallet', 'list', '--json').stdout).data;
-    assert.equal(wallets.find((item: { name: string }) => item.name === 'ledger').positions, 1);
 
     for (const [args, message] of [
       [['--wallet', 'nobody'], /No saved wallet named "nobody"/],

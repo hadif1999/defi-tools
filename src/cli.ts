@@ -16,9 +16,10 @@ import { hooklessV4PoolId } from './providers/pool-address.js';
 import { poolDex, printCreatePlan, printPoolList, printPools, printPositions, printPositionTables, printWallets, type Signer } from './output.js';
 import { parseAmount, parseDeadline, parseLimit, planPosition } from './create-position.js';
 import { CREATE_CHAINS } from './providers/tokens.js';
+import { walletBalances } from './providers/balances.js';
 import { RevertClient } from './providers/revert.js';
 import { loadPortfolio, splitPositions, type PositionSource, type WalletGroup } from './positions.js';
-import { CHAINS, DEXES, POOL_SORTS, POOL_VERSIONS, isEvmChain, type AppConfig, type Dex, type EvmChainId, type PoolScore, type ChainId, type Pool, type PoolSort, type PoolVersion, type PositionAnalysis, type Protocol, type SavedWallet } from './types.js';
+import { CHAINS, DEXES, SOLANA, POOL_SORTS, POOL_VERSIONS, isEvmChain, type AppConfig, type Dex, type EvmChainId, type PoolScore, type ChainId, type Pool, type PoolSort, type PoolVersion, type PositionAnalysis, type Protocol, type SavedWallet } from './types.js';
 
 const DEFAULT_TOP = 25;
 
@@ -363,7 +364,6 @@ list.action(async (options: { wallet?: string; walletAddr?: string; chain?: stri
       id: position.id, wallet: position.wallet, poolId: position.pool ?? '', chainId: position.chainId, protocol: position.protocol, lowerTick: position.tickLower, upperTick: position.tickUpper,
       currentTick: position.currentTick, liquidity: position.liquidity, valueUsd: position.valueUsd, source: position.source,
     })));
-    store.markWalletsChecked(result.checked);
     const { active, past } = splitPositions(result.positions);
     const both = Boolean(options.active) === Boolean(options.past);
     const sources = new Set(result.positions.map((position) => position.source));
@@ -487,7 +487,6 @@ for (const command of [analyze, check]) command.action(async (options) => {
     const rpc = new RpcProvider(config.rpcUrls);
     let failures = 0;
     const analyses: PositionAnalysis[] = [];
-    const checked: typeof checks = [];
     for (const { address: wallet, chainId } of checks) {
       const chain = chainId as EvmChainId;
       try {
@@ -496,7 +495,6 @@ for (const command of [analyze, check]) command.action(async (options) => {
           const pool: Pool = { id: position.poolId, chainId: chain, protocol: position.protocol, token0: { address: '', symbol: '?', decimals: 18 }, token1: { address: '', symbol: '?', decimals: 18 }, source: 'uniswap-api', observedAt: new Date().toISOString() };
           analyses.push(analyzePosition(position, position.currentTick ?? await rpc.currentTick(pool), config.saturationThresholdPct));
         }
-        checked.push({ address: wallet, chainId: chain });
       } catch (error) {
         failures += 1;
         console.error(`${wallet} on ${CHAINS[chain].name}: ${(error as Error).message}`);
@@ -504,7 +502,6 @@ for (const command of [analyze, check]) command.action(async (options) => {
     }
     if (failures === checks.length) throw new Error(source === 'public' ? 'Position RPC reads failed for every wallet/network. Public RPCs may be busy; retry or configure an RPC_URL_* endpoint. No Uniswap API key is needed.' : 'Custom position discovery failed for every wallet/network. Check your provider endpoint and access settings.');
     store.savePositions(analyses);
-    store.markWalletsChecked(checked);
     if (command === analyze) {
       printPositions(analyses, Boolean(options.json));
     } else {
@@ -621,13 +618,19 @@ walletAdd.action((address: string, options: { chain: string; name?: string }) =>
   console.log(`Saved ${saved.name}: ${saved.address} on ${CHAINS[saved.chainId].name}.`);
 }));
 
-const walletList = wallet.command('list').alias('ls').description('Show saved wallets with their network, address, dates, and known positions.')
+const walletList = wallet.command('list').alias('ls').description('Show saved wallets with their network, address, balance, and dates.')
+  .option('--no-balance', 'skip reading balances (no network requests)')
   .option('--json', 'print structured JSON instead of a table');
-commandHelp(walletList, ['defi-tool wallet list', 'defi-tool wallet list --json'], [
-  'Positions and Last checked come from earlier positions or alerts runs; they are not fetched by this command.',
+commandHelp(walletList, ['defi-tool wallet list', 'defi-tool wallet list --no-balance', 'defi-tool wallet list --json'], [
+  'Balance is read live: the native coin plus well-known tokens (WETH, USDC, cbBTC, ... on Base and Arbitrum) over RPC, SOL over Solana\'s public RPC, valued at DefiLlama prices.',
+  'A wallet whose balance cannot be read shows —; the reason goes to stderr.',
 ]);
-walletList.action((options: { json?: boolean }) => withStore((store, config) => {
-  printWallets(store.wallets(), Boolean(options.json));
+walletList.action((options: { balance: boolean; json?: boolean }) => withStore(async (store, config) => {
+  const wallets = store.wallets();
+  const balances = options.balance && wallets.length
+    ? await walletBalances(wallets, new RpcProvider(config.rpcUrls), { solanaRpcUrl: config.rpcUrls[SOLANA], pricesUrl: process.env.DEFI_TOOL_PRICES_URL })
+    : undefined;
+  printWallets(wallets, balances, Boolean(options.json));
   if (!options.json && config.wallets.length) console.log(`\nAlso checked: ${config.wallets.length} wallet address(es) saved by init in the configuration file.`);
 }));
 
@@ -660,10 +663,10 @@ walletEdit.action((name: string, options: { name?: string; chain?: string }) => 
 }));
 
 /** Run a wallet command against the configured database. */
-async function withStore(task: (store: Store, config: AppConfig) => void): Promise<void> {
+async function withStore(task: (store: Store, config: AppConfig) => void | Promise<void>): Promise<void> {
   const config = await loadConfig(configPath());
   const store = new Store(config.databasePath);
-  try { task(store, config); } finally { store.close(); }
+  try { await task(store, config); } finally { store.close(); }
 }
 
 /** A wallet belongs to exactly one network. */

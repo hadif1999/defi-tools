@@ -1,8 +1,8 @@
 import type { LpPosition, Pool, PoolScore, PoolSort, PositionAnalysis } from './types.js';
 import { invertPrice, rangePosition } from './positions-math.js';
-import type { WalletSummary } from './storage.js';
+import type { WalletBalance } from './providers/balances.js';
 import type { CreatePlan, PlanTransaction } from './create-position.js';
-import { CHAINS } from './types.js';
+import { CHAINS, type SavedWallet } from './types.js';
 
 const MISSING = '—';
 
@@ -132,19 +132,32 @@ export function printPositions(items: PositionAnalysis[], json: boolean): void {
 /** "2026-10-29 07:09" in UTC. */
 const formatTime = (iso: string | undefined): string => iso ? iso.slice(0, 16).replace('T', ' ') : MISSING;
 
-export function printWallets(wallets: WalletSummary[], json: boolean): void {
-  if (json) return console.log(JSON.stringify({ schemaVersion: 1, data: wallets }, null, 2));
+/** Saved wallets with their balances; balances maps names to holdings, or the error that prevented reading them. */
+export function printWallets(wallets: SavedWallet[], balances: Map<string, WalletBalance | Error> | undefined, json: boolean): void {
+  if (json) {
+    return console.log(JSON.stringify({ schemaVersion: 1, data: wallets.map((wallet) => {
+      const balance = balances?.get(wallet.name);
+      return { ...wallet, ...(balance instanceof Error ? { balanceError: balance.message } : balance ? { balance } : {}) };
+    }) }, null, 2));
+  }
   if (!wallets.length) return console.log('No saved wallets. Add one with defi-tool wallet add 0xYourWallet --chain eth --name my-wallet1.');
   const columns: Column[] = [
-    { header: 'Name' }, { header: 'Chain' }, { header: 'Type' }, { header: 'Address' }, { header: 'Added (UTC)' }, { header: 'Updated (UTC)' },
-    { header: 'Positions', align: 'right' }, { header: 'Last checked (UTC)' },
+    { header: 'Name' }, { header: 'Chain' }, { header: 'Type' }, { header: 'Address' },
+    ...(balances ? [{ header: 'Balance', align: 'right' as const }, { header: 'Holdings', max: 48 }] : []),
+    { header: 'Added (UTC)' }, { header: 'Updated (UTC)' },
   ];
-  console.log(renderTable(columns, wallets.map((wallet) => [
-    wallet.name, CHAINS[wallet.chainId].name, wallet.address.startsWith('0x') ? 'EVM' : 'Solana', wallet.address,
-    formatTime(wallet.createdAt), wallet.updatedAt === wallet.createdAt ? MISSING : formatTime(wallet.updatedAt),
-    wallet.lastCheckedAt ? String(wallet.positions) : MISSING, formatTime(wallet.lastCheckedAt),
-  ])));
-  console.log('\nPositions: open Uniswap positions found by the last positions or alerts run (— = never checked; run defi-tool positions list to refresh).');
+  console.log(renderTable(columns, wallets.map((wallet) => {
+    const balance = balances?.get(wallet.name);
+    const held = balance instanceof Error || !balance ? [] : balance.holdings.filter((holding) => holding.amount > 0);
+    return [
+      wallet.name, CHAINS[wallet.chainId].name, wallet.address.startsWith('0x') ? 'EVM' : 'Solana', wallet.address,
+      ...(balances ? [balance instanceof Error ? MISSING : formatUsd(balance?.valueUsd), balance instanceof Error ? 'unavailable' : held.map((holding) => `${formatNumber(holding.amount)} ${holding.symbol}`).join(', ') || 'empty'] : []),
+      formatTime(wallet.createdAt), wallet.updatedAt === wallet.createdAt ? MISSING : formatTime(wallet.updatedAt),
+    ];
+  })));
+  const failed = wallets.filter((wallet) => balances?.get(wallet.name) instanceof Error);
+  if (failed.length) console.error(`\nBalances unavailable: ${failed.map((wallet) => `${wallet.name} (${(balances!.get(wallet.name) as Error).message.split('\n')[0]})`).join('; ')}.`);
+  if (balances) console.log('\nBalance: native coin plus well-known tokens (WETH, USDC, ... on Base and Arbitrum; SOL only on Solana), in USD at DefiLlama prices.');
 }
 
 /** Prices and amounts with a fixed number of decimals for their size, so columns line up: 2,313.09, 1.0042, 0.05634. */

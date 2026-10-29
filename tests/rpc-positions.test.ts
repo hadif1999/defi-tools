@@ -20,6 +20,7 @@ async function withRpc(scenario: 'v3' | 'v4' | 'wrong-owner' | 'too-many' | 'ale
     req.on('data', (chunk) => { text += chunk; });
     req.on('end', () => {
       const request = JSON.parse(text);
+      if (request.method === 'eth_getBalance') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: '0x6f05b59d3b20000' })); return; } // 0.5 ETH.
       const data: string = request.params[0].data;
       let result: `0x${string}`;
       if (data.startsWith(toFunctionSelector('balanceOf(address)'))) result = encodeAbiParameters(parseAbiParameters('uint256'), [scenario === 'too-many' ? 501n : 1n]);
@@ -87,14 +88,15 @@ test('positions and alerts CLI default to key-free RPC, including alert exit cod
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('positions analyze checks saved wallets on their own network, by name or by default, and wallet list shows the result', async () => {
+test('positions analyze checks saved wallets on their own network, by name or by default, and wallet list shows balances', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'defi-tool-wallets-'));
   try {
     await withRpc('v3', async (_rpc, url) => {
       const config = join(directory, 'config.json');
       // No init wallets: only the saved wallets are checked. Base has no RPC URL, so a Base wallet would fail and say so.
-      writeFileSync(config, JSON.stringify({ chains: [8453], rpcUrls: { 1: url }, databasePath: join(directory, 'state.db') }));
-      const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('UNISWAP_') && !key.startsWith('DEFI_TOOL_') && !key.startsWith('RPC_URL_'))), DEFI_TOOL_CONFIG: config };
+      // Solana RPC and DefiLlama prices are unreachable: wallet list still shows the ETH read from the fixture node.
+      writeFileSync(config, JSON.stringify({ chains: [8453], rpcUrls: { 1: url, 501: 'http://127.0.0.1:9' }, databasePath: join(directory, 'state.db') }));
+      const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('UNISWAP_') && !key.startsWith('DEFI_TOOL_') && !key.startsWith('RPC_URL_'))), DEFI_TOOL_CONFIG: config, DEFI_TOOL_PRICES_URL: 'http://127.0.0.1:9' };
       const cli = (...args: string[]) => promisify(execFile)(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], { env, timeout: 10_000 });
       await cli('wallet', 'add', wallet, '--chain', 'eth', '--name', 'main');
       await cli('wallet', 'add', 'So11111111111111111111111111111111111111112', '--chain', 'sol');
@@ -105,9 +107,14 @@ test('positions analyze checks saved wallets on their own network, by name or by
       assert.equal(JSON.parse(all.stdout).data.length, 1);
       assert.match(all.stderr, /skipping Solana/);
       const listed = JSON.parse((await cli('wallet', 'list', '--json')).stdout).data;
-      assert.deepEqual(listed.map((item: { name: string; positions: number }) => [item.name, item.positions]), [['main', 1], ['wallet0', 0]]);
-      assert.ok(listed[0].lastCheckedAt);
-      assert.equal(listed[1].lastCheckedAt, undefined);
+      assert.deepEqual(listed.map((item: { name: string }) => item.name), ['main', 'wallet0']);
+      assert.deepEqual(listed[0].balance.holdings, [{ symbol: 'ETH', amount: 0.5 }]); // No price, so no USD value.
+      assert.match(listed[1].balanceError, /Solana RPC|fetch failed|ECONNREFUSED/);
+      const table = await cli('wallet', 'list');
+      assert.match(table.stdout, /Name\s+Chain\s+Type\s+Address\s+Balance\s+Holdings\s+Added \(UTC\)/);
+      assert.match(table.stdout, /main\s+Ethereum\s+EVM\s+0x0+1\s+—\s+0\.5000 ETH/);
+      assert.match(table.stdout, /wallet0\s+Solana\s+Solana\s+So1+\w*\s+—\s+unavailable/);
+      assert.match(table.stderr, /Balances unavailable: wallet0/);
     });
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

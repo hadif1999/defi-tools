@@ -67,10 +67,7 @@ test('saves, lists, renames, moves and deletes wallets with unique names and add
     assert.equal(store.updateWallet('trading', { chainId: 42161 }).chainId, 42161);
     assert.throws(() => store.updateWallet('missing', { name: 'x' }), /No saved wallet named "missing"/);
 
-    // Position counts come from recorded positions on the wallet's network; check time from markWalletsChecked.
-    store.savePositions([{ id: '7', wallet: address, poolId: 'p', chainId: 1, protocol: 'v3', source: 'rpc' }]);
-    store.markWalletsChecked([{ address, chainId: 1 }], '2026-10-29T02:00:00.000Z');
-    assert.deepEqual(store.wallets().map((item) => [item.name, item.positions, item.lastCheckedAt]), [['wallet0', 1, '2026-10-29T02:00:00.000Z'], ['trading', 0, undefined]]);
+    assert.deepEqual(store.wallets().map((item) => [item.name, item.chainId]), [['wallet0', 1], ['trading', 42161]]);
 
     assert.equal(store.deleteWallet('WALLET0'), true);
     assert.equal(store.deleteWallet('wallet0'), false);

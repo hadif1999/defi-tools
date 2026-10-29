@@ -110,7 +110,7 @@ Closed positions (4) · most recently closed first
 - **Options:** `--active` or `--past` shows one table (both by default). `--top` limits each table (default 100, up to 1000). `--chain` narrows the networks. `--wallet` takes saved names (see [Wallets](#wallets)), each read only on its saved network; `--wallet-addr` takes addresses, read on every network. Without either, every saved wallet is read, plus addresses saved by `init`. Solana wallets are skipped with a note. `--json` prints `{ "data": { "active": [...], "past": [...] } }`.
 - **Data source:** [Revert Finance](https://revert.finance)'s public positions API, without a key: one request per address finds open and closed positions on every network, with their full history. Uniswap's own APIs do not list positions (the Trading API key is not used), and free public RPCs cannot search an address's history on L2s. Revert is a third-party service: its data can lag by a few minutes.
 - **Fallback:** if Revert cannot be reached (or with `--source rpc`), the position NFTs the wallet still holds are read over public RPC, with USD prices from DefiLlama: price, range, status, balance and unclaimed fees are shown, but deposits, fees collected, PnL and dates are not, and burned NFTs are missed. Columns without any value are left out. `--source revert` fails instead of falling back. On-chain reads cover v3; v4 NFTs cannot be enumerated without an indexer.
-- Results are saved for `wallet list` (positions count and last checked time). No private key is ever requested.
+- No private key is ever requested.
 
 `positions analyze` keeps the earlier range check over RPC, which `alerts check` also uses:
 
@@ -158,7 +158,7 @@ Save wallets once by name, then refer to them in `positions` and `alerts`:
 defi-tool wallet add 0xYourWallet --chain eth                 # saved as wallet0 (then wallet1, ...)
 defi-tool wallet add 0xYourWallet --chain base --name my-wallet1
 defi-tool wallet add YourSolanaAddress --chain sol --name phantom
-defi-tool wallet list                                         # table; --json for scripts
+defi-tool wallet list                                         # table with balances; --no-balance, --json
 defi-tool wallet edit my-wallet1 --name base-main             # rename; --chain moves it to another network
 defi-tool wallet delete base-main                             # alias: wallet rm
 defi-tool positions list --wallet wallet0,base-main            # see Your positions
@@ -166,7 +166,7 @@ defi-tool positions list --wallet wallet0,base-main            # see Your positi
 
 - `--chain` is required and names exactly one network. EVM addresses (`0x` + 40 hex characters) go on EVM networks and are stored lowercase; Solana addresses (base58) go on Solana, case kept. An EVM address is the same on every EVM network, so save it once per network you use, or pass `--chain` to `positions`.
 - Names have up to 30 letters, digits, `.`, `_` or `-`, and ignore letter case (`wallet edit MAIN` finds `main`). Without `--name`, the first free `wallet0`, `wallet1`, ... is used. A name and an address/network pair can each be saved only once.
-- `wallet list` shows each wallet's name, network, type (EVM/Solana), address, when it was added and last edited, and the open Uniswap positions found by the last `positions` or `alerts` run, with that run's time. Listing makes no network requests.
+- `wallet list` shows each wallet's name, network, type (EVM/Solana), address, live balance, and when it was added and last edited. **Balance** is the USD value at DefiLlama prices; **Holdings** lists the native coin plus well-known tokens with a balance (WETH, USDC, cbBTC, wstETH, ... on Base and Arbitrum; native coin only elsewhere; SOL only on Solana, via its public RPC or `rpcUrls["501"]` in the configuration). A wallet that cannot be read shows `—`, with the reason on stderr. `--no-balance` skips the network requests; `--json` adds `balance` (or `balanceError`) to each wallet.
 - `wallet delete` removes only the saved wallet; position and alert history stays in the database. To change an address, delete the wallet and add it again.
 - `positions list --wallet` takes saved names, each read on its saved network (`--wallet-addr` takes addresses). `positions analyze` and `alerts` accept saved names or addresses in `--wallet`. A saved wallet is checked on its own network unless `--chain` is given; an address uses `--chain` or the networks saved by `init`. Without `--wallet`, every saved wallet is checked, plus any addresses saved by `init` or `DEFI_TOOL_WALLETS`. Solana wallets are skipped with a note, because positions are Uniswap NFTs on EVM networks.
 - Wallets live in the SQLite database (`wallets` table), next to the cache: `~/.local/share/defi-tool/state.db` or `DEFI_TOOL_DB_PATH`. Only public addresses are stored.

@@ -424,11 +424,12 @@ test('wallet commands validate input and keep wallets in the database', () => {
     const edited = wallet('edit', 'WALLET0', '--name', 'my-wallet1', '--chain', 'base');
     assert.equal(edited.status, 0, edited.stderr);
     assert.match(edited.stdout, /Updated wallet0: now my-wallet1, 0xabab.* on Base/);
-    const table = wallet('list').stdout;
-    assert.match(table, /Name\s+Chain\s+Type\s+Address\s+Added \(UTC\)\s+Updated \(UTC\)\s+Positions\s+Last checked \(UTC\)/);
+    const table = wallet('list', '--no-balance').stdout;
+    assert.match(table, /Name\s+Chain\s+Type\s+Address\s+Added \(UTC\)\s+Updated \(UTC\)\n/);
+    assert.doesNotMatch(table, /Positions/);
     assert.match(table, /my-wallet1\s+Base\s+EVM\s+0xabab/);
     assert.match(table, /phantom\s+Solana\s+Solana\s+So111/);
     assert.match(wallet('rm', 'phantom').stdout, /Deleted phantom/);
-    assert.deepEqual(JSON.parse(wallet('list', '--json').stdout).data.map((item: { name: string }) => item.name), ['my-wallet1']);
+    assert.deepEqual(JSON.parse(wallet('list', '--no-balance', '--json').stdout).data.map((item: { name: string }) => item.name), ['my-wallet1']);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

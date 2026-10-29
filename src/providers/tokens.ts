@@ -39,3 +39,6 @@ export function tokenAddress(chainId: EvmChainId, query: string): string | undef
 
 /** Symbols known on a network, for error messages. */
 export const knownSymbols = (chainId: EvmChainId): string[] => Object.keys(TOKENS[chainId] ?? {}).map((symbol) => symbol.toUpperCase());
+
+/** Every well-known token on a network, for wallet balances. */
+export const knownTokens = (chainId: EvmChainId): string[] => Object.values(TOKENS[chainId] ?? {});

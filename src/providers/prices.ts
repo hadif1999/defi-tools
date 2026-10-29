@@ -37,3 +37,21 @@ export async function dailyPrices(tokens: Array<{ chainId: EvmChainId; address: 
   }
   return history;
 }
+
+/** DefiLlama's key for a token: "base:0x…". */
+export const priceKey = (chainId: EvmChainId, address: string): string => `${chainNames[chainId]}:${address.toLowerCase()}`;
+
+/** Current USD prices for DefiLlama coin keys such as "base:0x…" or "coingecko:ethereum", keyed lowercase as given. */
+export async function coinPrices(keys: string[], options: { endpoint?: string; fetcher?: typeof fetch } = {}): Promise<Map<string, number>> {
+  const unique = [...new Set(keys.map((key) => key.toLowerCase()))];
+  const prices = new Map<string, number>();
+  for (let start = 0; start < unique.length; start += BATCH) {
+    const url = `${(options.endpoint ?? PRICES_URL).replace(/\/$/, '')}/prices/current/${unique.slice(start, start + BATCH).join(',')}`;
+    const body = await getJson(options.fetcher ?? fetch, url, 'DefiLlama prices', 20_000) as { coins?: Record<string, { price?: unknown }> } | null;
+    for (const [key, coin] of Object.entries(body?.coins ?? {})) {
+      const price = positive(coin?.price);
+      if (price !== undefined) prices.set(key.toLowerCase(), price);
+    }
+  }
+  return prices;
+}
