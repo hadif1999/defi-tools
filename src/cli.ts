@@ -453,6 +453,7 @@ create.action(async (pair: string | undefined, options: { chain: string; wallet?
   const store = new Store(config.databasePath);
   let wallet: string;
   try {
+    if (meansAll(options.wallet)) throw new Error('positions create plans one position for one wallet; --wallet all is not allowed. Name a saved wallet or a 0x address.');
     const saved = options.wallet === undefined ? defaultWallet(store, Boolean(options.json)) : store.wallet(options.wallet);
     if (options.wallet === undefined && !saved) throw new Error('No wallet to plan for: pass --wallet 0xYourWallet, or save one with defi-tool wallet add 0xYourWallet --chain base.');
     if (saved && !isEvmChain(saved.chainId)) throw new Error(`Saved wallet "${saved.name}" is a Solana wallet; positions are on EVM networks. Pass --wallet${options.wallet === undefined ? ', or set an EVM default with defi-tool wallet set-default' : ''}.`);
@@ -671,7 +672,7 @@ function walletTargets(value: string | undefined, chains: ChainId[] | undefined,
     else addInit();
     return targets;
   }
-  if (value.trim().toLowerCase() === 'all') {
+  if (meansAll(value)) {
     store.wallets().forEach(addSaved);
     addInit();
     return targets;
@@ -684,6 +685,10 @@ function walletTargets(value: string | undefined, chains: ChainId[] | undefined,
   }
   return targets;
 }
+
+/** Whether a --wallet value asks for every saved wallet: "all", alone or in a list (all,main). */
+const ALL_WALLETS = 'all';
+const meansAll = (value: string | undefined): boolean => value !== undefined && value.split(',').some((item) => item.trim().toLowerCase() === ALL_WALLETS);
 
 /**
  * The default wallet for a command run without --wallet: the one set with wallet set-default, else the most recently
@@ -722,7 +727,7 @@ function walletGroups(names: string | undefined, addresses: string | undefined, 
     add(saved.address, narrow(evmChains), saved.name);
   };
   const addInit = () => { for (const address of parseWallets(config.wallets.join(','))) add(address, narrow(config.chains)); };
-  if (names !== undefined && names.trim().toLowerCase() === 'all') {
+  if (meansAll(names)) {
     store.wallets().forEach(addSaved);
     addInit();
   } else if (names !== undefined) {
@@ -799,14 +804,14 @@ walletList.action((options: { balance: boolean; json?: boolean }) => withStore(a
 
 const walletHistoryCommand = wallet.command('history').alias('tx')
   .description('Show a wallet\'s latest transactions: swaps, liquidity adds and removes, fee collects, transfers, with USD values and gas.')
-  .argument('[wallet]', 'saved wallet name, or a 0x address (default: the default wallet, see wallet set-default)')
+  .argument('[wallet]', 'saved wallet name, a 0x address, or all for every saved wallet (default: the default wallet, see wallet set-default)')
   .option('--chain <names>', 'networks, e.g. base,arb or all (default: the saved wallet\'s network; every network for an address)')
   .option('--days <count>', 'how far back to look, 1-365 days (default: 30)', '30')
   .option('--type <kinds>', `only these kinds, comma-separated: ${ACTIVITY_KINDS.join(', ')}, or lp (all liquidity kinds)`)
   .option('--top <count>', 'rows to show, 1-500 (default: 50)', '50')
   .option('--all', 'also show likely spam airdrops (unknown, unpriced tokens)')
   .option('--json', 'print structured JSON with full hashes and explorer links');
-commandHelp(walletHistoryCommand, ['defi-tool wallet history', 'defi-tool wallet history ledger1', 'defi-tool wallet history ledger1 --chain base,arb --days 90', 'defi-tool wallet history ledger1 --type swap --top 20', 'defi-tool wallet history 0xYourWallet --type lp --json'], [
+commandHelp(walletHistoryCommand, ['defi-tool wallet history', 'defi-tool wallet history ledger1', 'defi-tool wallet history all --type lp', 'defi-tool wallet history ledger1 --chain base,arb --days 90', 'defi-tool wallet history ledger1 --type swap --top 20', 'defi-tool wallet history 0xYourWallet --type lp --json'], [
   'Liquidity activity (Uniswap v3/v4 adds, removes and fee collects) comes from Revert Finance, without a key.',
   'Swaps, sends, receives and wraps need a free Alchemy key: export ALCHEMY_API_KEY=... (or alchemyApiKey in the configuration file).',
   'Values are USD at the time of each transaction (DefiLlama). Swap cost = value sent − value received: price impact, pool fees and MEV.',
@@ -817,14 +822,31 @@ walletHistoryCommand.action((target: string | undefined, options: { chain?: stri
   if (days > 365) throw new Error('--days supports 1 through 365.');
   const top = parsePositiveInt(options.top, '--top')!;
   if (top > 500) throw new Error('--top supports 1 through 500.');
-  const saved = target === undefined ? defaultWallet(store, Boolean(options.json)) : store.wallet(target);
-  if (target === undefined && !saved) throw new Error('No saved wallets. Name a 0x address, e.g. defi-tool wallet history 0xYourWallet, or save one with defi-tool wallet add.');
-  if (saved && !isEvmChain(saved.chainId)) throw new Error(`"${saved.name}" is a Solana wallet; history covers EVM networks.`);
-  const address = saved?.address ?? target!.trim().toLowerCase();
-  if (!/^0x[0-9a-f]{40}$/.test(address)) throw new Error(`"${target}" is neither a saved wallet name nor a 0x address. Run defi-tool wallet list to see saved names.`);
   const evm = (Object.keys(CHAINS).map(Number) as ChainId[]).filter(isEvmChain);
-  const chains = (parseChains(options.chain) ?? (saved ? [saved.chainId] : evm)).filter(isEvmChain);
-  if (!chains.length) throw new Error('History covers EVM networks; choose one with --chain, e.g. --chain base.');
+  const requested = parseChains(options.chain);
+  // The wallets to read: one (named, an address, or the default), or every saved EVM wallet for "all".
+  // Wallets sharing an address are read together, on all their networks.
+  const targets: Array<{ names: string[]; address: string; chains: EvmChainId[] }> = [];
+  const addTarget = (address: string, chains: ChainId[], name?: string) => {
+    const evmChains = chains.filter(isEvmChain);
+    const found = targets.find((item) => item.address === address);
+    if (found) { found.chains = [...new Set([...found.chains, ...evmChains])]; if (name) found.names.push(name); } else targets.push({ names: name ? [name] : [], address, chains: evmChains });
+  };
+  if (target !== undefined && target.trim().toLowerCase() === ALL_WALLETS) {
+    const wallets = store.wallets();
+    const solana = wallets.filter((item) => !isEvmChain(item.chainId));
+    for (const item of wallets.filter((entry) => isEvmChain(entry.chainId))) addTarget(item.address, requested ?? [item.chainId], item.name);
+    if (solana.length && !options.json) console.error(`Note: skipping ${solana.map((item) => item.name).join(', ')} (Solana); history covers EVM networks.`);
+    if (!targets.length) throw new Error('No saved EVM wallets. Save one with defi-tool wallet add 0xYourWallet --chain eth.');
+  } else {
+    const saved = target === undefined ? defaultWallet(store, Boolean(options.json)) : store.wallet(target);
+    if (target === undefined && !saved) throw new Error('No saved wallets. Name a 0x address, e.g. defi-tool wallet history 0xYourWallet, or save one with defi-tool wallet add.');
+    if (saved && !isEvmChain(saved.chainId)) throw new Error(`"${saved.name}" is a Solana wallet; history covers EVM networks.`);
+    const address = saved?.address ?? target!.trim().toLowerCase();
+    if (!/^0x[0-9a-f]{40}$/.test(address)) throw new Error(`"${target}" is neither a saved wallet name nor a 0x address. Run defi-tool wallet list to see saved names, or use all.`);
+    addTarget(address, requested ?? (saved ? [saved.chainId] : evm), saved?.name);
+  }
+  if (targets.some((item) => !item.chains.length)) throw new Error('History covers EVM networks; choose one with --chain, e.g. --chain base.');
   let kinds: ActivityKind[] | undefined;
   if (options.type !== undefined) {
     kinds = [...new Set(options.type.toLowerCase().split(',').map((kind) => kind.trim()).flatMap((kind) => kind === 'lp' ? ['add-liquidity', 'remove-liquidity', 'collect-fees'] : [kind]))] as ActivityKind[];
@@ -834,11 +856,27 @@ walletHistoryCommand.action((target: string | undefined, options: { chain?: stri
   const alchemy = config.alchemyApiKey || process.env.DEFI_TOOL_ALCHEMY_URL
     ? new AlchemyClient({ apiKey: config.alchemyApiKey ?? '', endpoint: process.env.DEFI_TOOL_ALCHEMY_URL }) : undefined;
   if (!alchemy && !options.json) console.error('Note: ALCHEMY_API_KEY is not set, so only liquidity activity is shown. A free key adds swaps and transfers.');
-  const result = await walletHistory({
-    address, chains, since: Math.floor(Date.now() / 1000) - days * 86_400, kinds, top, includeSpam: Boolean(options.all), pricesUrl: process.env.DEFI_TOOL_PRICES_URL,
-  }, { revert: new RevertClient({ endpoint: process.env.DEFI_TOOL_REVERT_URL }), alchemy }, (message) => console.error(message));
-  const networks = chains.length === evm.length ? 'all networks' : chains.map((chain) => CHAINS[chain].name).join(', ');
-  printHistory(result, { json: Boolean(options.json), title: `Wallet history · ${saved ? `${saved.name} (${shortAddress(address)})` : shortAddress(address)} on ${networks}`, days });
+  const revert = new RevertClient({ endpoint: process.env.DEFI_TOOL_REVERT_URL });
+  const several = target !== undefined && target.trim().toLowerCase() === ALL_WALLETS;
+  const results: Array<{ wallets: string[]; address: string; chains: EvmChainId[]; result: Awaited<ReturnType<typeof walletHistory>> }> = [];
+  for (const item of targets) {
+    const result = await walletHistory({
+      address: item.address, chains: item.chains, since: Math.floor(Date.now() / 1000) - days * 86_400, kinds, top, includeSpam: Boolean(options.all), pricesUrl: process.env.DEFI_TOOL_PRICES_URL,
+    }, { revert, alchemy }, (message) => console.error(several ? `${item.names.join(', ')}: ${message}` : message));
+    results.push({ wallets: item.names, address: item.address, chains: item.chains, result });
+  }
+  // One wallet keeps the usual JSON; "all" prints one entry per wallet.
+  if (options.json && several) {
+    console.log(JSON.stringify({ schemaVersion: 1, data: results.map(({ wallets, address, chains, result }) => ({
+      wallets, address, chains, total: result.total, spamHidden: result.spamHidden, summary: result.summary, sources: result.sources, activities: result.activities,
+    })) }, null, 2));
+    return;
+  }
+  results.forEach(({ wallets, address, chains, result }, index) => {
+    const networks = chains.length === evm.length ? 'all networks' : chains.map((chain) => CHAINS[chain].name).join(', ');
+    if (index) console.log('');
+    printHistory(result, { json: Boolean(options.json), title: `Wallet history · ${wallets.length ? `${wallets.join(', ')} (${shortAddress(address)})` : shortAddress(address)} on ${networks}`, days });
+  });
 }));
 
 const walletSetDefault = wallet.command('set-default').alias('default')
@@ -858,6 +896,7 @@ walletSetDefault.action((target: string | undefined, options: { chain?: string }
     return;
   }
   const text = target.trim();
+  if (text.toLowerCase() === ALL_WALLETS) throw new Error('The default is one wallet. To read every saved wallet, pass --wallet all to the command instead.');
   const wallets = store.wallets();
   let saved = store.wallet(text);
   if (!saved && /^\d+$/.test(text)) {
@@ -932,6 +971,7 @@ function parseWalletAddress(value: string, chainId: ChainId): string {
 /** Names are short, so they can never be mistaken for an address in --wallet. */
 function parseWalletName(value: string): string {
   const name = value.trim();
+  if (name.toLowerCase() === ALL_WALLETS) throw new Error('"all" is reserved: --wallet all means every saved wallet. Choose another name.');
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,29}$/.test(name)) throw new Error(`Wallet name "${value}" is not valid: use 1-30 letters, digits, ".", "_" or "-", starting with a letter or digit, e.g. my-wallet1.`);
   return name;
 }

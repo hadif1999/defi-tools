@@ -419,6 +419,9 @@ test('wallet commands validate input and keep wallets in the database', () => {
       [['edit', 'phantom', '--chain', 'eth'], /not a valid Ethereum address/],
       [['delete', 'missing'], /No saved wallet named "missing"/],
       [['set-default', 'missing'], /No saved wallet "missing"/],
+      [['add', evm, '--chain', 'base', '--name', 'ALL'], /"all" is reserved: --wallet all means every saved wallet/],
+      [['edit', 'wallet0', '--name', 'all'], /"all" is reserved/],
+      [['set-default', 'all'], /The default is one wallet.*--wallet all/],
       [['set-default', '9'], /There is no wallet number 9; defi-tool wallet list shows 2 wallets/],
     ] as const) {
       const result = wallet(...args);

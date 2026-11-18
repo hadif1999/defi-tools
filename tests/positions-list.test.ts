@@ -76,11 +76,19 @@ test('positions list shows open and closed positions as two tables, by saved wal
     const byId = await cli('positions', 'detail', '#5723933', '--wallet', 'ledger', '--offline', '--no-plot', '--data-dir', join(directory, 'cache'), '--width', '120');
     assert.doesNotMatch(byId.stderr, /Using the default wallet/);
     assert.match(byId.stdout, /position #5723933/);
+    // wallet history all: one entry per saved EVM wallet, Solana skipped.
+    const history = await cli('wallet', 'history', 'all', '--type', 'lp', '--json');
+    const entries = JSON.parse(history.stdout).data;
+    assert.deepEqual(entries.map((entry: { wallets: string[]; address: string }) => [entry.wallets, entry.address]), [[['ledger'], WALLET]]);
+    assert.ok(Array.isArray(entries[0].activities));
+    const createAll = sync('positions', 'create', 'WETH/USDC', '--chain', 'base', '--wallet', 'all', '--amount', '10usd', '--full-range');
+    assert.equal(createAll.status, 1);
+    assert.match(createAll.stderr, /--wallet all is not allowed/);
     // --wallet all: every saved wallet, Solana skipped.
     const everything = await cli('positions', 'list', '--wallet', 'all');
     assert.match(everything.stdout, /ledger \(0x902e…3f00\) on all networks/);
     assert.match(everything.stderr, /Note: skipping phantom \(Solana\)/);
-    assert.equal(requests.filter((url) => url.includes('uniswapv3')).length, 10); // One request per address and run.
+    assert.equal(requests.filter((url) => url.includes('uniswapv3')).length, 11); // One request per address and run.
 
     for (const [args, message] of [
       [['--wallet', 'nobody'], /No saved wallet named "nobody"/],
