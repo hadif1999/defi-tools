@@ -150,7 +150,39 @@ test('the chart workspace draws, drags, edits and remembers like a trading termi
     await page.mouse('mouseMoved', at(0.5, 0.3).x, at(0.5, 0.3).y); await sleep(100);
     assert.match(await page.eval<string>(`document.getElementById('legend').innerText`), /MA 20\s+[\d,.]+[\s\S]*RSI 14\s+[\d.]+/);
 
-    // Timeframe and chart type changes keep the drawings; a reload restores everything.
+    // Every timeframe, up and back down: each bar matches an independent resampling, the view keeps the same
+    // moment in the middle (even from weekly bars down to hourly ones), and the drawings stay as they are.
+    const candles = fixture().candles;
+    const reference = (size: number) => {
+      const offset = size === 604_800 ? 4 * 86_400 : 0;
+      const groups = new Map<number, Candle[]>();
+      for (const c of candles) { const key = Math.floor((c.timestamp - offset) / size) * size + offset; groups.set(key, [...(groups.get(key) ?? []), c]); }
+      return [...groups].map(([time, list]) => ({ time, open: list[0]!.open, high: Math.max(...list.map((c) => c.high)), low: Math.min(...list.map((c) => c.low)), close: list.at(-1)!.close }));
+    };
+    const middleTime = async () => {
+      const range = await page.eval<{ from: number; to: number }>('chartApp.visible()');
+      const shown = await page.eval<number[]>('chartApp.mainData().map((d) => d.time)');
+      return shown[Math.max(0, Math.min(shown.length - 1, Math.round((range.from + range.to) / 2)))]!;
+    };
+    const kept = JSON.stringify(await page.eval('chartApp.drawings'));
+    const sizes = (await page.eval<Array<{ size: number }>>('chartApp.timeframes')).map((item) => item.size);
+    assert.deepEqual(sizes, [3_600, 7_200, 14_400, 43_200, 86_400, 604_800]);
+    for (const size of [...sizes, ...[...sizes].reverse()]) {
+      const before = await middleTime();
+      const previous = await page.eval<number>('chartApp.step');
+      await page.click(await page.center(`#timeframes [data-size="${size}"]`));
+      const plotted = await page.eval<Array<{ time: number; open: number; high: number; low: number; close: number }>>('chartApp.mainData()');
+      const expected = reference(size);
+      assert.equal(plotted.length, expected.length, `${size}: bars`);
+      plotted.forEach((bar, i) => {
+        const want = expected[i]!;
+        assert.ok(bar.time === want.time && [bar.open - want.open, bar.high - want.high, bar.low - want.low, bar.close - want.close].every((d) => Math.abs(d) < 1e-9), `${size}: bar ${i}`);
+      });
+      assert.ok(Math.abs(await middleTime() - before) <= Math.max(size, previous) * 1.5, `${size}: the view kept its moment`);
+      assert.equal(JSON.stringify(await page.eval('chartApp.drawings')), kept);
+    }
+
+    // Chart type changes keep the drawings; a reload restores everything.
     await page.click(await page.center('#timeframes [data-size="14400"]'));
     assert.equal(await page.eval('chartApp.step'), 14_400);
     assert.equal((await page.eval<unknown[]>('chartApp.drawings')).length, 3);

@@ -231,7 +231,9 @@
     chart.applyOptions({ timeScale: { timeVisible: step < 86400 } });
     buildMain(); buildIndicators();
     if (middle !== null && width) {
-      const bars = Math.max(20, width / step);
+      // Same moment in the middle and about the same span, but never more bars than fit at 2px each,
+      // or the chart would give up the position and jump to the latest bar.
+      const bars = clamp(width / step, 20, Math.max(20, paneWidth() / 2));
       const center = timeToLogical(middle);
       chart.timeScale().setVisibleLogicalRange({ from: center - bars / 2, to: center + bars / 2 });
     }
@@ -908,6 +910,10 @@
     setTool, setTimeframe, undo, redo,
     toScreen: (t, p) => { const rect = area.getBoundingClientRect(); return { x: rect.left + X(t), y: rect.top + Y(p) }; },
     lastCandle: () => rows[rows.length - 1],
+    timeframes: timeframes.map(([label, size]) => ({ label, size })),
+    /** What the main series and each indicator series plot right now. */
+    mainData: () => main.data().map((item) => ({ ...item })),
+    seriesData: () => Object.fromEntries(series.map((item) => [item.key, item.parts.map((part) => part.data().length)])),
     visible: () => chart.timeScale().getVisibleLogicalRange(),
   };
 })();
