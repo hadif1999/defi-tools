@@ -37,7 +37,7 @@ const app = new Command().name('defi-tool')
   .configureHelp({ showGlobalOptions: true }).showSuggestionAfterError(true)
   .showHelpAfterError('Run defi-tool --help, or add --help after any command for examples.');
 const configPath = (): string => app.opts().config ?? process.env.DEFI_TOOL_CONFIG ?? DEFAULT_CONFIG_PATH;
-commandHelp(app, ['defi-tool init', 'defi-tool chains', 'defi-tool pools scan --chain eth', 'defi-tool pools get WSOL/USDC', 'defi-tool wallet add 0xYourWallet --chain eth --name main', 'defi-tool positions list --wallet main', 'defi-tool dex-data download WETH/USDC --chain base', 'defi-tool market-data download ETH,BTC/ETH', 'defi-tool dex-ticker WETH/USDC --chain base --watch'], [
+commandHelp(app, ['defi-tool init', 'defi-tool chains', 'defi-tool pools scan --chain eth', 'defi-tool pools get WSOL/USDC', 'defi-tool wallet add 0xYourWallet --chain eth --name main', 'defi-tool positions list --wallet main', 'defi-tool dex-data download WETH/USDC --chain base', 'defi-tool market-data download ETH,BTC/ETH', 'defi-tool dex-ticker WETH/USDC --chain base --watch', 'defi-tool dashboard serve'], [
   'No API key or setup is needed for public data. wallet add saves wallets by name; init optionally saves networks and settings.',
   'Add --help to any command, e.g. defi-tool positions analyze --help.',
   `Use --json on data commands for scripts. Chain names: ${Object.values(CHAINS).map((chain) => chain.slug).join(', ')}, all.`,
@@ -700,6 +700,74 @@ dexTicker.action(async (pairArg: string | undefined, options: {
     input: process.stdin, render: renderTickerScreen, line: formatTickerLine,
   });
   if (!updates) process.exitCode = 1;
+});
+
+const dashboard = app.command('dashboard').description('Run a local web dashboard: positions, pools, markets, wallets, alerts and downloads in your browser.');
+commandHelp(dashboard, ['defi-tool dashboard serve', 'defi-tool dashboard serve --port 9000 --no-open', 'defi-tool dashboard serve --read-only'], [
+  'serve starts the dashboard and opens it in your browser; it runs until you press Ctrl+C.',
+]);
+dashboard.action(() => dashboard.outputHelp());
+const serve = dashboard.command('serve')
+  .description('Start the dashboard web server on this machine and open it in your browser.')
+  .option('--port <number>', 'port to listen on; 0 picks a free one', '8787')
+  .option('--host <address>', 'address to listen on; keep the default to stay private to this machine', '127.0.0.1')
+  .option('--strict-port', 'fail when the port is taken instead of trying the next ones')
+  .option('--no-open', 'do not open a browser; print the link instead')
+  .option('--token <value>', 'access token to require (default: a new random token each run; DEFI_TOOL_DASHBOARD_TOKEN also works)')
+  .option('--read-only', 'turn off every change: saving wallets, downloads and alert checks')
+  .option('--data-dir <folder>', 'dex-data cache: candles for charts and position reports, and where pool downloads go', 'dex-data')
+  .option('--market-dir <folder>', 'where market-data downloads go', 'market-data')
+  .option('--refresh <interval>', 'how often pages refresh positions and balances, at least 15s (e.g. 30s, 2m)', '60s')
+  .option('--offline', 'cached candles only: no live tickers, pool searches or downloads')
+  .option('--log', 'print one line per request')
+  .option('--quiet', 'print only the link')
+  .option('--json', 'print { url, loginUrl, host, port } as JSON once listening');
+commandHelp(serve, [
+  'defi-tool dashboard serve',
+  'defi-tool dashboard serve --port 9000',
+  'defi-tool dashboard serve --no-open --json',
+  'defi-tool dashboard serve --read-only --refresh 2m',
+  'defi-tool dashboard serve --data-dir ./data --offline',
+], [
+  'Pages: overview, positions (with the full position report), pools explorer, markets with live tickers, wallets and history, plan a position, alerts, data downloads, settings.',
+  'Access needs a token: the printed link carries it once and the browser keeps a session cookie. Only this machine can connect unless --host says otherwise.',
+  'The dashboard uses the same configuration, database and data folders as the commands, so wallets saved in one show in the other.',
+  'Without --strict-port, a taken port moves on to the next free one (up to 10).',
+]);
+serve.action(async (options: { port: string; host: string; strictPort?: boolean; open: boolean; token?: string; readOnly?: boolean; dataDir: string; marketDir: string; refresh: string; offline?: boolean; log?: boolean; quiet?: boolean; json?: boolean }) => {
+  const port = Number(options.port);
+  if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error(`--port "${options.port}" is not a port number (0-65535).`);
+  const refreshMs = parseInterval(options.refresh);
+  if (refreshMs < 15_000) throw new Error('--refresh must be at least 15s, so public sources are not overloaded.');
+  const host = options.host.trim().replace(/^\[|\]$/g, '');
+  const loopback = host === 'localhost' || host === '::1' || /^127\./.test(host);
+  const config = await loadConfig(configPath());
+  const { startDashboard } = await import('./dashboard/server.js');
+  const running = await startDashboard({
+    config, port, host, strictPort: options.strictPort, token: options.token ?? process.env.DEFI_TOOL_DASHBOARD_TOKEN, readOnly: options.readOnly, offline: options.offline,
+    dataDir: options.dataDir, marketDir: options.marketDir, refreshMs, log: options.log ? (line) => console.error(line) : undefined,
+  });
+  if (options.json) console.log(JSON.stringify({ url: running.url, loginUrl: running.loginUrl, host: running.host, port: running.port }));
+  else if (options.quiet) console.log(running.loginUrl);
+  else {
+    console.log(`defi-tool dashboard ${running.state.version} · ${running.url}${running.port !== port && port !== 0 ? ` (port ${port} was taken)` : ''}`);
+    console.log(`Open: ${running.loginUrl}`);
+    console.log(`Data: ${config.databasePath} · candles ${options.dataDir} · market ${options.marketDir}${options.readOnly ? ' · read-only' : ''}${options.offline ? ' · offline' : ''}`);
+    console.log('Press Ctrl+C to stop.');
+  }
+  if (!loopback) console.error(`Warning: listening on ${host}, so other machines on your network can reach the dashboard. The access token still guards it; keep the link private.`);
+  if (options.open) {
+    const opened = await openInBrowser(running.loginUrl);
+    if (!opened && !options.json) console.error('No browser could be started; open the link above yourself.');
+  }
+  const stop = (signal: string) => {
+    if (!options.json && !options.quiet) console.error(`\n${signal === 'SIGINT' ? 'Stopping' : `Received ${signal}, stopping`} the dashboard…`);
+    const force = setTimeout(() => process.exit(0), 3_000);
+    force.unref();
+    void running.close().then(() => process.exit(0));
+  };
+  process.once('SIGINT', () => stop('SIGINT'));
+  process.once('SIGTERM', () => stop('SIGTERM'));
 });
 
 const help = app.command('help [command...]').description('Show help for any command or subcommand.');

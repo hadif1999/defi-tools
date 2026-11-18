@@ -97,6 +97,21 @@ export class Store {
       VALUES(?, ?, ?, ?, ?, ?, ?)`).run(alert.fingerprint, alert.type, alert.wallet, alert.positionId, alert.message, alert.createdAt, alert.acknowledged ? 1 : 0);
   }
 
+  /** Saved alerts, newest first (at most `limit`), optionally only those for some wallets. */
+  alerts(options: { limit?: number; wallets?: string[] } = {}): Alert[] {
+    const wallets = options.wallets?.map((wallet) => wallet.toLowerCase());
+    const where = wallets?.length ? `WHERE lower(wallet) IN (${wallets.map(() => '?').join(',')})` : '';
+    const rows = this.db.prepare(`SELECT * FROM alerts ${where} ORDER BY created_at DESC, rowid DESC LIMIT ?`).all(...(wallets ?? []), options.limit ?? 200) as Array<{
+      fingerprint: string; type: Alert['type']; wallet: string; position_id: string; message: string; created_at: string; acknowledged: number;
+    }>;
+    return rows.map((row) => ({ fingerprint: row.fingerprint, type: row.type, wallet: row.wallet, positionId: row.position_id, message: row.message, createdAt: row.created_at, acknowledged: Boolean(row.acknowledged) }));
+  }
+
+  /** Mark an alert as seen; returns false when no alert has that fingerprint. */
+  acknowledgeAlert(fingerprint: string): boolean {
+    return Number(this.db.prepare('UPDATE alerts SET acknowledged=1 WHERE fingerprint=?').run(fingerprint).changes) > 0;
+  }
+
   /** Remembered pool addresses and creation times, keyed by chain:version:pool. */
   poolIdentities(keys: string[]): Map<string, PoolIdentity> {
     const select = this.db.prepare('SELECT address, created_at, checked_at FROM pool_identities WHERE key=?');
