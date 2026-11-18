@@ -1,6 +1,6 @@
 # defi-tool
 
-A read-only DeFi CLI: pool discovery and ranking for Uniswap, PancakeSwap, Aerodrome and Curve (EVM chains) and Raydium (Solana), Uniswap LP position analysis and on-demand alerts, historical price candles for any of those pools and for the market as a whole, a live pool ticker, and transaction plans for new Uniswap v3 positions that your own wallet signs.
+A read-only DeFi CLI: pool discovery and ranking for Uniswap, PancakeSwap, Aerodrome and Curve (EVM chains) and Raydium (Solana), Uniswap LP position analysis and on-demand alerts, historical price candles for any of those pools and for the market as a whole, a live pool ticker, transaction plans for new Uniswap v3 positions that your own wallet signs, and a local web dashboard (`defi-tool dashboard serve`) for all of it.
 
 **No Uniswap API key is needed.** Pool listings use DefiLlama's public yields API (GeckoTerminal is available as an alternative); position checks and alerts use public chain RPCs. A custom provider is optional.
 
@@ -33,6 +33,7 @@ defi-tool dex-data download --help
 defi-tool dex-data show --help
 defi-tool market-data download --help
 defi-tool dex-ticker --help
+defi-tool dashboard serve --help
 defi-tool init --help
 ```
 
@@ -373,6 +374,50 @@ WETH/USDC  2,322.12 USDC per WETH  24h -1.42%  H 2,390.19  L 2,291.41  Vol $12.9
 - **Source and limits:** GeckoTerminal's public API, without a key. It refreshes pool prices about every 10–60 seconds, so a faster `--interval` repeats prices. Each update takes one request; the 24h candles are refreshed once a minute (one more request). GeckoTerminal allows about 30 requests a minute, and rate limits are waited out.
 - `--json` prints the pool, price unit and every figure unformatted, plus `updatedAt`. `--no-color` or `NO_COLOR` turns colors off; they are also off when the output is not a terminal.
 
+## Dashboard
+
+`dashboard serve` starts a local web dashboard and opens it in your browser: everything the commands show, on pages that refresh themselves. It uses the same configuration, database and data folders as the commands, so a wallet saved in one appears in the other.
+
+```bash
+defi-tool dashboard serve                          # http://127.0.0.1:8787, opens your browser
+defi-tool dashboard serve --port 9000 --no-open    # print the link instead of opening it
+defi-tool dashboard serve --read-only --refresh 2m # no changes; pages refresh every 2 minutes
+defi-tool dashboard serve --offline                # cached candles only: no live prices or downloads
+defi-tool dashboard serve --no-open --json         # { "url", "loginUrl", "host", "port" } for scripts
+```
+
+```text
+$ defi-tool dashboard serve
+defi-tool dashboard 0.1.0 · http://127.0.0.1:8787/
+Open: http://127.0.0.1:8787/?token=…
+Data: ~/.local/share/defi-tool/state.db · candles dex-data · market market-data
+Press Ctrl+C to stop.
+```
+
+**Pages**
+- **Overview:** open value, unclaimed and lifetime fees, PnL, impermanent loss and range health for the selected wallets; positions out of range or near a limit; allocation by pool and network; wallet balances; the latest alerts.
+- **Positions:** the open and closed tables of `positions list`, with a range bar and status per position, status filter, sorting, column choice and CSV export. A row opens the **position page**: key figures, the live pool price against the range, and the full `positions detail --output html` report (range gauge, price chart with the range band and transactions, value against price, impermanent loss, PnL attribution, transactions), with a candle-size choice.
+- **Markets:** a **watchlist** of live pool tickers (`dex-ticker --watch`, streamed by the server; add pairs, or pools from the Pools page), each opening the pool's **chart page**: the `dex-data show --output html` chart workspace with the live ticker. Below, **market prices** (`market-data`) for coins and cross rates, as prices or as % change to compare them.
+- **Alerts:** run `alerts check` in the background and see each position's range status; saved alerts, which can be marked as seen.
+- **Pools:** `pools scan`, `get` and `rank` with every option, including a builder for `--filter` conditions and the data source; rows open the chart, join the watchlist, or plan a position.
+- **Plan position:** the `positions create` form; it shows the range, deposit, volatility check, simulation, warnings and the approve and mint steps as `mm` commands or raw `to`/`value`/`data`, each with a copy button. Nothing is signed or sent.
+- **Wallets:** saved wallets with live balances; add, rename, move, delete and choose the default, with the same rules and messages as `wallet add` and `wallet edit`. Each wallet's **history** (`wallet history`) has filters for networks, days, kinds and spam.
+- **Data:** `dex-data download` and `market-data download` as background jobs with live progress (dry runs too), and the saved files with their metadata, to chart or download.
+- **Settings:** the configuration in use (which keys and RPC URLs are set, never their values), server status, and this browser's preferences.
+
+The top bar chooses the **wallets** every page reads (the default wallet, all saved wallets, or any you pick, plus any address) and the **networks**. It also has auto-refresh with a countdown (`--refresh`, default 60 s; a page you are not looking at waits), the light or dark theme, and a command palette (**Ctrl K**). Shortcuts: `r` refresh, `t` theme, `g` then a letter to change page (`g p` positions, `g m` markets, ...), `?` for the list. Each page shows the equivalent `defi-tool` command, ready to copy. The wallet selection, watchlist, table columns and forms are remembered in your browser.
+
+**Options:** `--port` (default `8787`; `0` picks a free port; a taken port moves on to the next free one, up to 10, unless `--strict-port`), `--host` (default `127.0.0.1`), `--no-open`, `--token`, `--read-only`, `--data-dir` (default `dex-data`) and `--market-dir` (default `market-data`), `--refresh` (at least `15s`), `--offline`, `--log` (one line per request on stderr), `--quiet` (only the link), `--json`.
+
+**Security:** the dashboard can read your wallets and change saved data, so it is guarded:
+- **Network:** it listens on `127.0.0.1` only, and answers only to its own host name, which stops DNS-rebinding pages from reaching it.
+- **Access token:** each run makes a new random token (or use `--token`, or `DEFI_TOOL_DASHBOARD_TOKEN`). The printed link carries it once; the browser swaps it for an `HttpOnly`, `SameSite=Strict` session cookie, and the token leaves the address bar. Scripts can send `Authorization: Bearer <token>`.
+- **Changes:** requests that change data must come from the dashboard's own pages. `--read-only` turns changes off altogether; planning a position stays available, since it changes nothing.
+- **Browser:** pages run under a strict Content-Security-Policy (scripts only from the dashboard, or inline with a per-response nonce), and downloads are served by file name from the data folders only.
+- **Other machines:** `--host 0.0.0.0` lets other machines connect, with a warning; the token still guards access, so keep the link private. No private key is ever requested.
+
+**API:** the pages use a JSON API under `/api/` that calls the same code as the commands. Answers are `{ data, notes, cachedAt, cached }`, and `notes` holds what the command would print on stderr. Errors are `{ error: { message, code } }`. Slow sources are cached briefly: pools 5 minutes, positions and balances 1 minute; `?refresh=1` or the refresh button reads them again. Live prices and job progress arrive as server-sent events (`/api/events`). GeckoTerminal requests share one client that keeps within its public limit of about 30 a minute, so the first chart of a pool, or a long watchlist, takes a few seconds to fill.
+
 ## Configuration
 
 `init` guides terminal users through chains, wallets, and optional RPC URLs; it does not ask for an API key. `defi-tool wallet add` is the easier way to save wallets: by name and network, editable later. Non-interactive callers can supply flags; remaining settings use defaults. Use real `0x` wallet addresses with 40 hexadecimal characters.
@@ -418,4 +463,4 @@ npm run build
 npm run dev -- positions --help
 ```
 
-Run everything with `npm test`. `tests/chart-ui.test.ts` drives the HTML chart in headless Chrome or Chromium with real mouse and keyboard events (set `CHROME_PATH` to point at another build); it is skipped when no browser is installed. `DEFI_TOOL_DEXSCREENER_URL`, `DEFI_TOOL_REVERT_URL`, `DEFI_TOOL_PRICES_URL`, `DEFI_TOOL_ALCHEMY_URL`, `DEFI_TOOL_GECKOTERMINAL_URL` and `DEFI_TOOL_COINGECKO_URL` point DexScreener, Revert Finance, DefiLlama prices (also market-data), Alchemy, dex-data downloads and market-data coin lookups at test servers. Targeted provider checks: `node --import tsx --test tests/defillama-pools.test.ts tests/public-pools.test.ts tests/output.test.ts tests/rpc-positions.test.ts tests/analytics.test.ts tests/storage.test.ts`. CLI checks: `node --import tsx --test tests/config.test.ts tests/cli.test.ts tests/install.test.ts`. The project uses built-in `node:sqlite`, avoiding a native SQLite addon.
+Run everything with `npm test`. `tests/chart-ui.test.ts` and `tests/dashboard-ui.test.ts` drive the HTML chart and the dashboard in headless Chrome or Chromium with real mouse and keyboard events (set `CHROME_PATH` to point at another build); they are skipped when no browser is installed. `tests/dashboard-server.test.ts` covers the dashboard's access control, API, jobs, events and files in process. Command logic lives in `src/services/`, shared by the CLI (`src/cli.ts`) and the dashboard server (`src/dashboard/`); the dashboard's pages are plain ES modules in `assets/dashboard/`, served as they are (no build step). `DEFI_TOOL_DEXSCREENER_URL`, `DEFI_TOOL_REVERT_URL`, `DEFI_TOOL_PRICES_URL`, `DEFI_TOOL_ALCHEMY_URL`, `DEFI_TOOL_GECKOTERMINAL_URL` and `DEFI_TOOL_COINGECKO_URL` point DexScreener, Revert Finance, DefiLlama prices (also market-data), Alchemy, dex-data downloads and market-data coin lookups at test servers. Targeted provider checks: `node --import tsx --test tests/defillama-pools.test.ts tests/public-pools.test.ts tests/output.test.ts tests/rpc-positions.test.ts tests/analytics.test.ts tests/storage.test.ts`. CLI checks: `node --import tsx --test tests/config.test.ts tests/cli.test.ts tests/install.test.ts`. The project uses built-in `node:sqlite`, avoiding a native SQLite addon.

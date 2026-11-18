@@ -1,18 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildChartHtml } from '../src/html-chart.js';
 import { showStats, type ShowView } from '../src/dex-show.js';
 import type { Candle } from '../src/dex-data.js';
+import { browser, Page, sleep } from './helpers/browser.js';
 
 // Drives the HTML chart workspace in headless Chrome with real mouse and keyboard events (DevTools protocol).
 // Runs when Chrome or Chromium is installed (or CHROME_PATH is set); skipped otherwise.
 
-const browser = [process.env.CHROME_PATH, 'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']
-  .find((name) => name && spawnSync(name, ['--version'], { stdio: 'ignore' }).status === 0);
 
 const H = 3_600;
 function fixture(): ShowView {
@@ -28,38 +27,7 @@ function fixture(): ShowView {
   };
 }
 
-class Page {
-  private id = 0;
-  private readonly pending = new Map<number, (message: { result?: { result?: { value?: unknown }; exceptionDetails?: unknown } }) => void>();
-  readonly errors: string[] = [];
-  constructor(private readonly ws: WebSocket) {
-    ws.addEventListener('message', (event) => {
-      const message = JSON.parse(String(event.data));
-      if (message.id && this.pending.has(message.id)) { this.pending.get(message.id)!(message); this.pending.delete(message.id); }
-      if (message.method === 'Runtime.exceptionThrown') this.errors.push(message.params.exceptionDetails.exception?.description ?? message.params.exceptionDetails.text);
-    });
-  }
-  send(method: string, params: object = {}) { return new Promise<{ result?: { result?: { value?: unknown }; exceptionDetails?: unknown } }>((resolve) => { this.id += 1; this.pending.set(this.id, resolve); this.ws.send(JSON.stringify({ id: this.id, method, params })); }); }
-  async eval<T>(expression: string): Promise<T> {
-    const reply = await this.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
-    if (reply.result?.exceptionDetails) throw new Error(JSON.stringify(reply.result.exceptionDetails));
-    return reply.result?.result?.value as T;
-  }
-  mouse(type: string, x: number, y: number, buttons = 0) { return this.send('Input.dispatchMouseEvent', { type, x, y, button: type === 'mouseMoved' && !buttons ? 'none' : 'left', buttons, clickCount: type === 'mouseMoved' ? 0 : 1 }); }
-  async click({ x, y }: { x: number; y: number }) { await this.mouse('mouseMoved', x, y); await this.mouse('mousePressed', x, y, 1); await this.mouse('mouseReleased', x, y); await sleep(60); }
-  async drag(from: { x: number; y: number }, to: { x: number; y: number }) {
-    await this.mouse('mouseMoved', from.x, from.y); await this.mouse('mousePressed', from.x, from.y, 1);
-    for (let i = 1; i <= 8; i += 1) await this.mouse('mouseMoved', from.x + (to.x - from.x) * i / 8, from.y + (to.y - from.y) * i / 8, 1);
-    await this.mouse('mouseReleased', to.x, to.y); await sleep(60);
-  }
-  async key(key: string, code: string, modifiers = 0) {
-    const vk = { Delete: 46, Escape: 27 }[key] ?? key.toUpperCase().charCodeAt(0);
-    await this.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, modifiers, windowsVirtualKeyCode: vk });
-    await this.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, modifiers, windowsVirtualKeyCode: vk });
-  }
-  center(selector: string) { return this.eval<{ x: number; y: number }>(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`); }
-}
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 
 test('the chart workspace draws, drags, edits and remembers like a trading terminal', { skip: browser ? false : 'Chrome or Chromium is not installed', timeout: 90_000 }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'defi-tool-chart-ui-'));
