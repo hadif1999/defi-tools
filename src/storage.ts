@@ -5,8 +5,6 @@ import type { Alert, ChainId, Pool, Position, PositionAnalysis, SavedWallet } fr
 
 export interface PoolIdentity { address?: string; createdAt?: string; checkedAt: string }
 
-/** A saved wallet with what the database knows about it: positions found by earlier checks and when it was last checked. */
-export interface WalletSummary extends SavedWallet { positions: number; lastCheckedAt?: string }
 
 type WalletRow = { name: string; address: string; chain_id: number; created_at: string; updated_at: string };
 const toWallet = (row: WalletRow): SavedWallet => ({ name: row.name, address: row.address, chainId: row.chain_id as ChainId, createdAt: row.created_at, updatedAt: row.updated_at });
@@ -52,6 +50,7 @@ export class Store {
         name TEXT PRIMARY KEY COLLATE NOCASE, address TEXT NOT NULL, chain_id INTEGER NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, checked_at TEXT, UNIQUE(address, chain_id)
       );
+      CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS scan_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT, command TEXT NOT NULL,
         started_at TEXT NOT NULL, completed_at TEXT, warnings TEXT NOT NULL DEFAULT '[]'
@@ -98,6 +97,21 @@ export class Store {
       VALUES(?, ?, ?, ?, ?, ?, ?)`).run(alert.fingerprint, alert.type, alert.wallet, alert.positionId, alert.message, alert.createdAt, alert.acknowledged ? 1 : 0);
   }
 
+  /** Saved alerts, newest first (at most `limit`), optionally only those for some wallets. */
+  alerts(options: { limit?: number; wallets?: string[] } = {}): Alert[] {
+    const wallets = options.wallets?.map((wallet) => wallet.toLowerCase());
+    const where = wallets?.length ? `WHERE lower(wallet) IN (${wallets.map(() => '?').join(',')})` : '';
+    const rows = this.db.prepare(`SELECT * FROM alerts ${where} ORDER BY created_at DESC, rowid DESC LIMIT ?`).all(...(wallets ?? []), options.limit ?? 200) as Array<{
+      fingerprint: string; type: Alert['type']; wallet: string; position_id: string; message: string; created_at: string; acknowledged: number;
+    }>;
+    return rows.map((row) => ({ fingerprint: row.fingerprint, type: row.type, wallet: row.wallet, positionId: row.position_id, message: row.message, createdAt: row.created_at, acknowledged: Boolean(row.acknowledged) }));
+  }
+
+  /** Mark an alert as seen; returns false when no alert has that fingerprint. */
+  acknowledgeAlert(fingerprint: string): boolean {
+    return Number(this.db.prepare('UPDATE alerts SET acknowledged=1 WHERE fingerprint=?').run(fingerprint).changes) > 0;
+  }
+
   /** Remembered pool addresses and creation times, keyed by chain:version:pool. */
   poolIdentities(keys: string[]): Map<string, PoolIdentity> {
     const select = this.db.prepare('SELECT address, created_at, checked_at FROM pool_identities WHERE key=?');
@@ -130,12 +144,29 @@ export class Store {
     return row && toWallet(row);
   }
 
-  /** Saved wallets in the order they were added, with their position counts. */
-  wallets(): WalletSummary[] {
-    const rows = this.db.prepare(`SELECT w.*, COUNT(p.id) AS positions, w.checked_at AS last_checked_at FROM wallets w
-      LEFT JOIN positions p ON p.wallet = w.address AND p.chain_id = w.chain_id
-      GROUP BY w.name ORDER BY w.created_at, w.rowid`).all() as Array<WalletRow & { positions: number; last_checked_at: string | null }>;
-    return rows.map((row) => ({ ...toWallet(row), positions: row.positions, lastCheckedAt: row.last_checked_at ?? undefined }));
+  /** Saved wallets in the order they were added. */
+  wallets(): SavedWallet[] {
+    return (this.db.prepare('SELECT * FROM wallets ORDER BY created_at, rowid').all() as WalletRow[]).map(toWallet);
+  }
+
+  /**
+   * The default wallet for commands run without --wallet: the one chosen with wallet set-default, or else the most
+   * recently added wallet. `chosen` says which.
+   */
+  defaultWallet(): { wallet: SavedWallet; chosen: boolean } | undefined {
+    const row = this.db.prepare("SELECT value FROM settings WHERE key='default_wallet'").get() as { value: string } | undefined;
+    const chosen = row && this.wallet(row.value);
+    if (chosen) return { wallet: chosen, chosen: true };
+    const latest = this.db.prepare('SELECT * FROM wallets ORDER BY created_at DESC, rowid DESC LIMIT 1').get() as WalletRow | undefined;
+    return latest && { wallet: toWallet(latest), chosen: false };
+  }
+
+  /** Make a saved wallet the default; returns it. */
+  setDefaultWallet(name: string): SavedWallet {
+    const wallet = this.wallet(name);
+    if (!wallet) throw new Error(`No saved wallet named "${name}". Run defi-tool wallet list to see your wallets.`);
+    this.db.prepare("INSERT INTO settings(key, value) VALUES('default_wallet', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(wallet.name);
+    return wallet;
   }
 
   /** The first free default name: wallet0, wallet1, ... */
@@ -150,18 +181,17 @@ export class Store {
     const next = { ...current, name: changes.name ?? current.name, chainId: changes.chainId ?? current.chainId };
     this.assertWalletFree(next, current.name);
     this.db.prepare('UPDATE wallets SET name=?, chain_id=?, updated_at=? WHERE name=?').run(next.name, next.chainId, now, current.name);
+    // A renamed default stays the default.
+    this.db.prepare("UPDATE settings SET value=? WHERE key='default_wallet' AND value=? COLLATE NOCASE").run(next.name, current.name);
     return this.wallet(next.name)!;
   }
 
-  /** Record that positions were read for these saved wallets (address and network). */
-  markWalletsChecked(targets: Array<{ address: string; chainId: ChainId }>, now = new Date().toISOString()): void {
-    const update = this.db.prepare('UPDATE wallets SET checked_at=? WHERE address=? AND chain_id=?');
-    for (const target of targets) update.run(now, target.address, target.chainId);
-  }
-
-  /** Remove a saved wallet; its position history stays. Returns false when no wallet has that name. */
+  /** Remove a saved wallet; its position history stays. Returns false when no wallet has that name. A deleted default is unset. */
   deleteWallet(name: string): boolean {
-    return Number(this.db.prepare('DELETE FROM wallets WHERE name=?').run(name).changes) > 0;
+    const deleted = Number(this.db.prepare('DELETE FROM wallets WHERE name=?').run(name).changes) > 0;
+    // Deleting the chosen default falls back to the most recently added wallet.
+    if (deleted) this.db.prepare("DELETE FROM settings WHERE key='default_wallet' AND value=? COLLATE NOCASE").run(name);
+    return deleted;
   }
 
   private assertWalletFree(wallet: Pick<SavedWallet, 'name' | 'address' | 'chainId'>, except?: string): void {

@@ -1,7 +1,14 @@
 import type { LpPosition, Pool, PoolScore, PoolSort, PositionAnalysis } from './types.js';
 import { invertPrice, rangePosition } from './positions-math.js';
-import type { WalletSummary } from './storage.js';
-import { CHAINS } from './types.js';
+import type { WalletBalance } from './providers/balances.js';
+import { activityValue, swapResult, type HistoryResult } from './history.js';
+import { ACTIVITY_KINDS, type ActivityKind, type Leg, type WalletActivity } from './types.js';
+import type { CreatePlan, PlanTransaction } from './create-position.js';
+import { CHAINS, type SavedWallet } from './types.js';
+import type { GeckoPool } from './providers/geckoterminal.js';
+import type { DexDataset } from './dex-data.js';
+import type { Ticker } from './dex-ticker.js';
+import { MARKET_TIMEFRAMES, SAMPLE_PERIODS, type MarketDataset } from './market-data.js';
 
 const MISSING = '—';
 
@@ -64,7 +71,7 @@ export function poolVersion(pool: Pool): string {
   return pool.protocol.startsWith('v') ? pool.protocol : pool.protocol.toUpperCase();
 }
 
-interface Column { header: string; align?: 'left' | 'right'; max?: number }
+export interface Column { header: string; align?: 'left' | 'right'; max?: number }
 
 /** Plain aligned text table; no quotes or box characters, so it reads well and copies cleanly. */
 export function renderTable(columns: Column[], rows: string[][]): string {
@@ -131,19 +138,34 @@ export function printPositions(items: PositionAnalysis[], json: boolean): void {
 /** "2026-10-29 07:09" in UTC. */
 const formatTime = (iso: string | undefined): string => iso ? iso.slice(0, 16).replace('T', ' ') : MISSING;
 
-export function printWallets(wallets: WalletSummary[], json: boolean): void {
-  if (json) return console.log(JSON.stringify({ schemaVersion: 1, data: wallets }, null, 2));
+/** Saved wallets with their balances; balances maps names to holdings, or the error that prevented reading them. */
+export function printWallets(wallets: SavedWallet[], balances: Map<string, WalletBalance | Error> | undefined, json: boolean, defaults?: { wallet: SavedWallet; chosen: boolean }): void {
+  const isDefault = (wallet: SavedWallet) => defaults?.wallet.name === wallet.name;
+  if (json) {
+    return console.log(JSON.stringify({ schemaVersion: 1, data: wallets.map((wallet) => {
+      const balance = balances?.get(wallet.name);
+      return { ...wallet, default: isDefault(wallet), ...(balance instanceof Error ? { balanceError: balance.message } : balance ? { balance } : {}) };
+    }) }, null, 2));
+  }
   if (!wallets.length) return console.log('No saved wallets. Add one with defi-tool wallet add 0xYourWallet --chain eth --name my-wallet1.');
   const columns: Column[] = [
-    { header: 'Name' }, { header: 'Chain' }, { header: 'Type' }, { header: 'Address' }, { header: 'Added (UTC)' }, { header: 'Updated (UTC)' },
-    { header: 'Positions', align: 'right' }, { header: 'Last checked (UTC)' },
+    { header: '#', align: 'right' }, { header: 'Name' }, { header: 'Default' }, { header: 'Chain' }, { header: 'Type' }, { header: 'Address' },
+    ...(balances ? [{ header: 'Balance', align: 'right' as const }, { header: 'Holdings', max: 48 }] : []),
+    { header: 'Added (UTC)' }, { header: 'Updated (UTC)' },
   ];
-  console.log(renderTable(columns, wallets.map((wallet) => [
-    wallet.name, CHAINS[wallet.chainId].name, wallet.address.startsWith('0x') ? 'EVM' : 'Solana', wallet.address,
-    formatTime(wallet.createdAt), wallet.updatedAt === wallet.createdAt ? MISSING : formatTime(wallet.updatedAt),
-    wallet.lastCheckedAt ? String(wallet.positions) : MISSING, formatTime(wallet.lastCheckedAt),
-  ])));
-  console.log('\nPositions: open Uniswap positions found by the last positions or alerts run (— = never checked; run defi-tool positions list to refresh).');
+  console.log(renderTable(columns, wallets.map((wallet, index) => {
+    const balance = balances?.get(wallet.name);
+    const held = balance instanceof Error || !balance ? [] : balance.holdings.filter((holding) => holding.amount > 0);
+    return [
+      String(index + 1), wallet.name, isDefault(wallet) ? (defaults!.chosen ? '★ default' : '★ latest') : '', CHAINS[wallet.chainId].name, wallet.address.startsWith('0x') ? 'EVM' : 'Solana', wallet.address,
+      ...(balances ? [balance instanceof Error ? MISSING : formatUsd(balance?.valueUsd), balance instanceof Error ? 'unavailable' : held.map((holding) => `${formatNumber(holding.amount)} ${holding.symbol}`).join(', ') || 'empty'] : []),
+      formatTime(wallet.createdAt), wallet.updatedAt === wallet.createdAt ? MISSING : formatTime(wallet.updatedAt),
+    ];
+  })));
+  if (defaults) console.log(`\n${defaults.chosen ? `★ default: ${defaults.wallet.name}, used when a command is run without --wallet.` : `★ latest: no default chosen, so ${defaults.wallet.name}, the latest added, is used when a command is run without --wallet.`} Change it with defi-tool wallet set-default <name|#>.`);
+  const failed = wallets.filter((wallet) => balances?.get(wallet.name) instanceof Error);
+  if (failed.length) console.error(`\nBalances unavailable: ${failed.map((wallet) => `${wallet.name} (${(balances!.get(wallet.name) as Error).message.split('\n')[0]})`).join('; ')}.`);
+  if (balances) console.log('\nBalance: native coin plus well-known tokens (WETH, USDC, ... on Base and Arbitrum; SOL only on Solana), in USD at DefiLlama prices.');
 }
 
 /** Prices and amounts with a fixed number of decimals for their size, so columns line up: 2,313.09, 1.0042, 0.05634. */
@@ -267,9 +289,278 @@ export function printPositionTables(active: LpPosition[], past: LpPosition[], op
   if (!shown.length) return;
   const notes = ['Prices are in the Unit column: the quote is a stablecoin or the wrapped native coin when the pair has one.'];
   if (shown.some((position) => position.historyAvailable)) notes.push('Fees earned: collected plus unclaimed, over the position\'s life. Fee APR: fees earned ÷ deposits, annualized over the time held.',
-    'PnL: value now + withdrawals + fees − deposits − gas, each in USD when it happened. IL: impermanent loss against holding the deposited tokens.');
+    'PnL: value now + withdrawals + fees − deposits − gas, each in USD when it happened. IL: impermanent loss, fees excluded: what the position returned minus the deposited tokens, both valued at the exit price (today\'s for open positions).');
   if (shown.some((position) => !position.historyAvailable)) notes.push('On-chain data only: deposits, withdrawals, collected fees, PnL and dates are unknown, and closed positions are the NFTs the wallet still holds.');
   if (shownPast.length) notes.push(shownPast.some((position) => position.exitPrice !== undefined) ? 'Exit price: pool price at the last withdrawal. Price now: current pool price.' : 'Price now: current pool price.');
   if (missing) notes.push('— means the source has no value for that position.');
   console.log(`\n${notes.join('\n')}`);
+}
+
+export type Signer = 'mm' | 'raw';
+
+/** The command that signs and sends one planned transaction with the MetaMask agent wallet CLI. */
+export function mmCommand(chainId: number, transaction: PlanTransaction): string {
+  const payload = JSON.stringify({ to: transaction.to, data: transaction.data, value: `0x${BigInt(transaction.value).toString(16)}` });
+  return `mm wallet send-transaction --chain-id ${chainId} --payload '${payload}' --intent '${transaction.description.replaceAll("'", '')}'`;
+}
+
+/** A planned position: what will be deposited where, what to check, and the transactions to sign in order. */
+export function printCreatePlan(plan: CreatePlan, options: { json: boolean; signer: Signer }): void {
+  const commands = options.signer === 'mm' ? plan.transactions.map((transaction) => mmCommand(plan.chainId, transaction)) : undefined;
+  if (options.json) return console.log(JSON.stringify({ schemaVersion: 1, data: { ...plan, commands } }, null, 2));
+  const { token0, token1, range, deposit } = plan;
+  const fee = `${plan.pool.feeTier / 10_000}%`;
+  const amount = (value: string, symbol: string) => `${formatNumber(Number(value))} ${symbol}`;
+  const usd = (value: string, price: number | undefined) => price === undefined ? '' : ` (${formatUsd(Number(value) * price)})`;
+  const pct = (value: number) => `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
+  const rows: Array<[string, string]> = [
+    ['Pool', `${token0.symbol}/${token1.symbol} ${fee} v3 · ${plan.pool.address}${plan.pool.tvlUsd !== undefined ? ` · TVL ${formatUsd(plan.pool.tvlUsd)}` : ''}`],
+    ['Price now', `${formatNumber(plan.price)} ${plan.unit}`],
+    ['Range', range.fullRange ? 'Full range (every price)' : `${formatNumber(range.lower)} – ${formatNumber(range.upper)} ${plan.unit} (${pct(range.lowerPct)} / ${pct(range.upperPct)}; ticks ${range.tickLower} to ${range.tickUpper}, spacing ${plan.pool.tickSpacing})`],
+    ['Deposit', `${([[deposit.amount0, token0], [deposit.amount1, token1]] as const).map(([value, info], side) => [value, info, deposit.nativeSide === side] as const)
+      .filter(([value]) => Number(value) > 0).map(([value, info, native]) => `${amount(value, native ? 'ETH' : info.symbol)}${usd(value, info.priceUsd)}`).join(' + ') || '0'}${deposit.valueUsd !== undefined ? ` = ${formatUsd(deposit.valueUsd)}` : ''}`],
+    ['Minimum', `${amount(deposit.min0, token0.symbol)}, ${amount(deposit.min1, token1.symbol)} (the mint reverts if the price moves further before it lands)`],
+    ['Wallet', `${plan.wallet}: ${amount(plan.wallets.balance0, token0.symbol)}, ${amount(plan.wallets.balance1, token1.symbol)}, ${amount(plan.wallets.native, 'ETH')}`],
+  ];
+  if (plan.volatility) {
+    const days = (value: number | undefined) => value === undefined ? undefined : value < 1 ? '<1 day' : `~${Math.round(value)} days`;
+    const reach = [days(plan.volatility.daysToLower) && `lower limit ${days(plan.volatility.daysToLower)}`, days(plan.volatility.daysToUpper) && `upper limit ${days(plan.volatility.daysToUpper)}`].filter(Boolean).join(', ');
+    rows.push(['Volatility', `±${plan.volatility.dailyPct.toFixed(1)}% a day over ${plan.volatility.days} days${reach ? `; a typical move reaches the ${reach}` : ''}`]);
+  }
+  const simulation = { passed: `passed${plan.simulation.tokenId ? ` (would mint #${plan.simulation.tokenId}` : ''}${plan.simulation.gas ? `, ~${Number(plan.simulation.gas).toLocaleString('en-US')} gas` : ''}${plan.simulation.tokenId ? ')' : ''}`,
+    failed: `failed: ${plan.simulation.message}`, 'after-approvals': 'after the approvals' }[plan.simulation.status];
+  rows.push(['Simulation', simulation], ['Deadline', `${plan.deadline.slice(0, 16).replace('T', ' ')} UTC (the mint reverts after this)`]);
+  const width = Math.max(...rows.map(([label]) => label.length));
+  console.log(`New Uniswap v3 position · ${CHAINS[plan.chainId].name} · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC\n`);
+  console.log(rows.map(([label, value]) => `${label.padEnd(width)}  ${value}`).join('\n'));
+  if (plan.warnings.length) console.log(`\nWarnings:\n${plan.warnings.map((warning) => `  ! ${warning}`).join('\n')}`);
+  console.log(`\n${plan.ready ? 'Transactions' : 'Transactions (not ready: fix the warnings above first)'}, in order, from ${plan.wallet}:`);
+  plan.transactions.forEach((transaction, index) => {
+    console.log(`\n${index + 1}. ${transaction.description}${transaction.value !== '0' ? ` (sends ${formatNumber(Number(transaction.value) / 1e18)} ETH)` : ''}`);
+    if (commands) console.log(`   ${commands[index]}`);
+    else console.log(`   to: ${transaction.to}\n   value: ${transaction.value}\n   data: ${transaction.data}`);
+  });
+  const notes = ['Nothing has been signed or sent. Sign each transaction with the wallet above, in order, waiting for each to confirm.'];
+  if (plan.simulation.status === 'after-approvals') notes.push('After the approvals confirm, run this command again: it rebuilds the mint at the latest price and simulates it.');
+  if (commands) notes.push('Check any step with: mm decode --payload <data>. --signer raw prints to/value/data for any other wallet.');
+  console.log(`\n${notes.join('\n')}`);
+}
+
+const kindLabels: Record<ActivityKind, string> = {
+  swap: 'Swap', 'add-liquidity': 'Add liquidity', 'remove-liquidity': 'Remove liquidity', 'collect-fees': 'Collect fees',
+  send: 'Send', receive: 'Receive', wrap: 'Wrap', unwrap: 'Unwrap', other: 'Other',
+};
+const shortAddress = (address: string) => `${address.slice(0, 6)}…${address.slice(-4)}`;
+const legsText = (legs: Leg[]) => legs.map((leg) => `${formatNumber(leg.amount)} ${leg.symbol}`).join(' + ') || '—';
+
+/** One line saying what moved: "0.0100 WETH → 23.1000 USDC (−$0.08)", "WETH/USDC 0.05% v3 #57 → 0.0323 WETH". */
+export function activityDetails(activity: WalletActivity): string {
+  const position = activity.pool ? `${activity.pool}${activity.positionId ? ` #${activity.positionId}` : ''}` : '';
+  const others = (activity.counterparty ?? '').split(', ').filter(Boolean).map(shortAddress).join(', ');
+  switch (activity.kind) {
+    case 'swap': case 'wrap': case 'unwrap': case 'other': {
+      const result = swapResult(activity);
+      return `${legsText(activity.sent)} → ${legsText(activity.received)}${result !== undefined && Math.abs(result) >= 0.005 ? ` (${formatSignedUsd(result)})` : ''}`;
+    }
+    case 'add-liquidity': return `${legsText(activity.sent)} → ${position}`;
+    case 'remove-liquidity': return `${position} → ${legsText(activity.received)}${activity.fees?.length ? ` + fees ${legsText(activity.fees)}` : ''}`;
+    case 'collect-fees': return `${position} → ${legsText(activity.received)}`;
+    case 'send': return `${legsText(activity.sent)} → ${others}`;
+    case 'receive': return `${legsText(activity.received)} ← ${others}`;
+  }
+}
+
+/** Wallet history: a summary of the period, then one row per transaction, newest first. */
+export function printHistory(result: HistoryResult, options: { json: boolean; title: string; days: number }): void {
+  if (options.json) return console.log(JSON.stringify({ schemaVersion: 1, data: { total: result.total, spamHidden: result.spamHidden, summary: result.summary, sources: result.sources, activities: result.activities } }, null, 2));
+  const { activities, summary } = result;
+  console.log(`${options.title} · last ${options.days} day${options.days === 1 ? '' : 's'}`);
+  console.log(`Source: ${result.sources.join(' and ') || 'none'} · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC`);
+  if (!activities.length) {
+    console.log('\nNo transactions in this period. Try a longer --days, another --chain, or fewer --type filters.');
+  } else {
+    const counts = ACTIVITY_KINDS.filter((kind) => summary.byKind[kind]).map((kind) => `${summary.byKind[kind]} ${kindLabels[kind].toLowerCase()}`).join(', ');
+    const totals = [
+      summary.swapVolumeUsd ? `swapped ${formatUsd(summary.swapVolumeUsd)} (cost ${formatUsd(Math.max(0, summary.swapCostUsd))})` : '',
+      summary.addedUsd ? `added ${formatUsd(summary.addedUsd)}` : '', summary.removedUsd ? `removed ${formatUsd(summary.removedUsd)}` : '',
+      summary.feesCollectedUsd ? `fees collected ${formatUsd(summary.feesCollectedUsd)}` : '', `gas ${formatUsd(summary.gasUsd)}`,
+    ].filter(Boolean).join(' · ');
+    console.log(`${result.total > activities.length ? `Showing ${activities.length} of ${result.total} transactions` : `${activities.length} transaction${activities.length === 1 ? '' : 's'}`}: ${counts}`);
+    console.log(`${totals}\n`);
+    const chain = new Set(activities.map((activity) => activity.chainId)).size > 1;
+    const columns: Column[] = [
+      { header: '#', align: 'right' }, { header: 'Time (UTC)' }, ...(chain ? [{ header: 'Chain' }] : []), { header: 'Type' },
+      { header: 'Details', max: 96 }, { header: 'Value', align: 'right' }, { header: 'Gas', align: 'right' }, { header: 'Tx' },
+    ];
+    console.log(renderTable(columns, activities.map((activity, index) => [
+      String(index + 1), formatTime(activity.timestamp), ...(chain ? [CHAINS[activity.chainId].name] : []), kindLabels[activity.kind] + (activity.spam ? ' (spam?)' : ''),
+      activityDetails(activity), formatUsd(activityValue(activity)), activity.gasUsd !== undefined ? formatUsd(activity.gasUsd) : activity.gasNative === undefined ? MISSING : `${formatNumber(activity.gasNative)} ${CHAINS[activity.chainId].native}`,
+      shortAddress(activity.hash),
+    ])));
+  }
+  const notes = ['Values are in USD at the time of each transaction. Gas is shown for transactions this wallet sent; swap cost = value sent − value received.'];
+  if (result.spamHidden) notes.push(`${result.spamHidden} likely spam airdrop(s) of unknown, unpriced tokens hidden; --all shows them.`);
+  if (!result.sources.includes('Alchemy')) notes.push('Swaps and transfers need a free Alchemy key: export ALCHEMY_API_KEY=... (https://dashboard.alchemy.com). Liquidity activity needs no key.');
+  else notes.push('Approvals and transactions that moved no tokens are not listed. --json gives full hashes and explorer links.');
+  console.log(`\n${notes.join('\n')}`);
+}
+
+/** One pair or pool of a dex-data download: what was used, and what was written or went wrong. */
+export interface DexDownload {
+  label: string;
+  pool?: GeckoPool;
+  alternatives: GeckoPool[];
+  dataset?: Omit<DexDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'> & Partial<DexDataset>;
+  plannedRequests?: number;
+  files?: string[];
+  error?: string;
+}
+
+const geckoPoolLabel = (pool: GeckoPool) => `${pool.name}${pool.version ? ` ${pool.version}` : ''} ${pool.dex ? pool.dex[0]!.toUpperCase() + pool.dex.slice(1) : pool.dexId}`;
+
+/** The dex-data summary: one row per pair with the pool used, candle counts and checks, then files and notes. */
+export function printDexDownloads(results: DexDownload[], options: { json: boolean; dryRun: boolean; timeframe: string; from: number; to: number }): void {
+  if (options.json) {
+    console.log(JSON.stringify({ data: results.map((result) => ({ pair: result.label, ...(result.dataset ?? {}), plannedRequests: result.plannedRequests, files: result.files, alternatives: result.alternatives.map((pool) => ({ address: pool.address, name: pool.name, dexId: pool.dexId, tvlUsd: pool.tvlUsd, chainId: pool.chainId })), error: result.error })) }, null, 2));
+    return;
+  }
+  const exact = (value: number | undefined) => value === undefined ? MISSING : value.toLocaleString('en-US');
+  const day = (seconds: number) => new Date(seconds * 1000).toISOString().slice(0, 16).replace('T', ' ');
+  console.log(`DEX data · ${options.timeframe} candles · ${day(options.from)} – ${day(options.to)} UTC${options.dryRun ? ' · dry run' : ''}`);
+  console.log('Source: GeckoTerminal public API (no key)\n');
+  const done = results.filter((result) => result.pool && !result.error);
+  if (done.length) {
+    const columns = [{ header: '#', align: 'right' as const }, { header: 'Pair' }, { header: 'Chain' }, { header: 'Pool' }, { header: 'TVL', align: 'right' as const }, { header: 'Unit' },
+      ...(options.dryRun ? [{ header: 'Requests', align: 'right' as const }] : [{ header: 'Candles', align: 'right' as const }, { header: 'Filled', align: 'right' as const }, { header: 'Dropped', align: 'right' as const }, { header: 'Jumps', align: 'right' as const }, { header: 'First candle' }])];
+    console.log(renderTable(columns, done.map((result, index) => {
+      const validation = result.dataset!.validation;
+      const dropped = validation ? Object.values(validation.dropped).reduce((sum, count) => sum + count, 0) : 0;
+      const first = validation && result.dataset!.candles ? validation.leadingEmpty === 0 ? 'range start' : `+${formatCount(validation.leadingEmpty)} periods` : MISSING;
+      return [String(index + 1), result.label, CHAINS[result.pool!.chainId].name, geckoPoolLabel(result.pool!), formatUsd(result.pool!.tvlUsd), result.dataset!.priceUnit,
+        ...(options.dryRun ? [String(result.plannedRequests)] : [exact(result.dataset!.candles), exact(validation?.filled), exact(dropped), exact(validation?.jumps), result.dataset!.candles ? first : 'no trades']),
+      ];
+    })));
+    console.log('');
+    for (const result of done) {
+      console.log(`${result.label}: ${options.dryRun ? 'would write ' : ''}${result.files!.join(', ')}`);
+      const validation = result.dataset!.validation;
+      if (validation) {
+        const reasons = Object.entries(validation.dropped).map(([reason, count]) => `${count} ${reason}`);
+        if (validation.conflicts) reasons.push(`${validation.conflicts} repeated periods with different values (first kept)`);
+        if (reasons.length) console.log(`  Dropped: ${reasons.join(', ')}.`);
+        if (validation.jumps) console.log(`  ${validation.jumps} candle(s) closed more than 50% away from the previous close; check them before relying on the data.`);
+        if (validation.leadingEmpty && result.dataset!.candles) console.log(`  No trades in the first ${formatCount(validation.leadingEmpty)} periods (pool created ${result.pool!.createdAt?.slice(0, 10) ?? 'at an unknown date'}); the data starts at its first trade.`);
+        if (!result.dataset!.candles) console.log('  No trades in this range: the file has no candles.');
+        if (validation.missing && result.dataset!.fill === 'none') console.log(`  ${formatCount(validation.missing)} periods without trades are left out (--fill none).`);
+      }
+      if (result.alternatives.length) console.log(`  Other pools: ${result.alternatives.map((pool) => `${geckoPoolLabel(pool)} on ${CHAINS[pool.chainId].name} (${formatUsd(pool.tvlUsd)}, ${pool.address.slice(0, 10)}…)`).join('; ')}. Pick one with --fee, --protocol or --pool.`);
+    }
+  }
+  for (const result of results.filter((item) => item.error)) console.error(`${result.label}: ${result.error}`);
+}
+
+/** One coin or pair of a market-data download: what was used, and what was written or went wrong. */
+export interface MarketDownload {
+  label: string;
+  dataset?: Omit<MarketDataset, 'candles' | 'validation' | 'requests' | 'downloadedAt'> & Partial<MarketDataset>;
+  plannedRequests?: number;
+  files?: string[];
+  error?: string;
+}
+
+/** The market-data summary: one row per pair with the coins found, candle counts and checks, then files and notes. */
+export function printMarketDownloads(results: MarketDownload[], options: { json: boolean; dryRun: boolean; timeframe: string; from: number; to: number }): void {
+  if (options.json) {
+    console.log(JSON.stringify({ data: results.map((result) => ({ pair: result.label, ...(result.dataset ?? {}), plannedRequests: result.plannedRequests, files: result.files, error: result.error })) }, null, 2));
+    return;
+  }
+  const exact = (value: number | undefined) => value === undefined ? MISSING : value.toLocaleString('en-US');
+  const minute = (seconds: number) => new Date(seconds * 1000).toISOString().slice(0, 16).replace('T', ' ');
+  const coin = (item: { key: string; symbol: string }) => item.key === 'usd' ? 'USD' : `${item.symbol} (${item.key})`;
+  console.log(`Market data · ${options.timeframe} candles · ${minute(options.from)} – ${minute(options.to)} UTC${options.dryRun ? ' · dry run' : ''}`);
+  console.log('Source: DefiLlama blended prices (no key) · coins found on CoinGecko\n');
+  const done = results.filter((result) => result.dataset && !result.error);
+  if (done.length) {
+    const columns = [{ header: '#', align: 'right' as const }, { header: 'Pair' }, { header: 'Coin', max: 36 }, { header: 'Quote', max: 36 }, { header: 'Sample' },
+      ...(options.dryRun ? [{ header: 'Requests', align: 'right' as const }] : [{ header: 'Candles', align: 'right' as const }, { header: 'Filled', align: 'right' as const }, { header: 'Thin', align: 'right' as const }, { header: 'Jumps', align: 'right' as const }, { header: 'Confidence', align: 'right' as const }, { header: 'First candle' }])];
+    console.log(renderTable(columns, done.map((result, index) => {
+      const dataset = result.dataset!;
+      const validation = dataset.validation;
+      const scores = validation ? Object.values(validation.confidence).filter((score): score is number => score !== undefined) : [];
+      const first = !dataset.candles ? 'no data' : validation!.leadingEmpty === 0 ? 'range start' : `+${exact(validation!.leadingEmpty)} periods`;
+      return [String(index + 1), result.label, coin(dataset.base), coin(dataset.quote), dataset.sample,
+        ...(options.dryRun ? [String(result.plannedRequests)] : [exact(dataset.candles), exact(validation?.filled), exact(validation?.lowSamples), exact(validation?.jumps), scores.length ? Math.min(...scores).toFixed(2) : MISSING, first]),
+      ];
+    })));
+    console.log('');
+    for (const result of done) {
+      const dataset = result.dataset!;
+      console.log(`${result.label}: ${options.dryRun ? 'would write ' : ''}${result.files!.join(', ')}`);
+      const validation = dataset.validation;
+      if (!validation) continue;
+      const reasons = Object.entries(validation.dropped).map(([reason, count]) => `${count} ${reason}`);
+      if (validation.duplicates) reasons.push(`${validation.duplicates} duplicate samples`);
+      if (validation.unmatched) reasons.push(`${validation.unmatched} ${dataset.base.symbol} samples without a ${dataset.quote.symbol} sample at the same time`);
+      if (reasons.length) console.log(`  Left out: ${reasons.join(', ')}.`);
+      if (validation.lowSamples) console.log(`  ${exact(validation.lowSamples)} candle(s) used fewer than half the usual samples; their highs and lows are less reliable.`);
+      const perCandle = Math.round(MARKET_TIMEFRAMES[dataset.timeframe] / SAMPLE_PERIODS[dataset.sample]);
+      if (perCandle < 4) console.log(`  ${dataset.sample} samples give ${perCandle === 1 ? 'one sample per candle, so open, high, low and close are the same price' : `at most ${perCandle} samples per candle, so highs and lows are rough`}. DefiLlama keeps finer prices only for larger coins.`);
+      if (dataset.candles && validation.filled / dataset.candles > 0.25) console.log(`  ${Math.round(validation.filled / dataset.candles * 100)}% of candles are filled: DefiLlama has few prices for this coin at this spacing. Try a coarser --sample or --timeframe.`);
+      if (validation.jumps) console.log(`  ${validation.jumps} candle(s) closed more than 50% away from the previous close; check them before relying on the data.`);
+      const low = Object.entries(validation.confidence).filter(([, score]) => score !== undefined && score < 0.9);
+      if (low.length) console.log(`  DefiLlama's confidence is low for ${low.map(([symbol, score]) => `${symbol} (${score!.toFixed(2)})`).join(', ')}: few or disagreeing price sources.`);
+      if (validation.leadingEmpty && dataset.candles) console.log(`  No samples for the first ${exact(validation.leadingEmpty)} periods; the data starts at the first sample.`);
+      if (!dataset.candles) console.log('  DefiLlama has no prices for this range: the file has no candles. Try a later --from or a coarser --sample.');
+      if (validation.missing && dataset.fill === 'none') console.log(`  ${exact(validation.missing)} periods without samples are left out (--fill none).`);
+    }
+  }
+  for (const result of results.filter((item) => item.error)) console.error(`${result.label}: ${result.error}`);
+}
+
+/** ANSI colors for the ticker, or plain text when color is off (NO_COLOR, not a terminal). */
+export function palette(enabled: boolean) {
+  const wrap = (code: string) => (text: string) => enabled ? `\x1b[${code}m${text}\x1b[0m` : text;
+  return { green: wrap('32'), red: wrap('31'), bold: wrap('1'), dim: wrap('2') };
+}
+
+const signedPercent = (value: number | undefined) => value === undefined || !Number.isFinite(value) ? MISSING : `${value > 0 ? '+' : ''}${value.toFixed(2)}%`;
+const tickerPool = (ticker: Ticker) => `${ticker.pool.dex ? ticker.pool.dex[0]!.toUpperCase() + ticker.pool.dex.slice(1) : ticker.pool.dexId}${ticker.pool.version ? ` ${ticker.pool.version}` : ''}${ticker.pool.feeTier === undefined ? '' : ` ${ticker.pool.feeTier / 10_000}%`}`;
+
+/** One line, like an exchange ticker: pair, price, 24h change, high, low, volume, liquidity, and the pool. */
+export function formatTickerLine(ticker: Ticker, color = false): string {
+  const paint = palette(color);
+  const change = ticker.change24hPct === undefined ? MISSING : (ticker.change24hPct >= 0 ? paint.green : paint.red)(signedPercent(ticker.change24hPct));
+  return [
+    paint.bold(ticker.pair), `${paint.bold(formatNumber(ticker.price))} ${ticker.priceUnit}`, `24h ${change}`,
+    `H ${formatNumber(ticker.high24h)}`, `L ${formatNumber(ticker.low24h)}`, `Vol ${formatUsd(ticker.volume24hUsd)}`, `Liq ${formatUsd(ticker.liquidityUsd)}`,
+    paint.dim(`${tickerPool(ticker)} on ${CHAINS[ticker.pool.chainId].name}`),
+  ].join('  ');
+}
+
+/**
+ * The --watch screen: the price large and colored by its last move, the 24h figures below, and a status line with
+ * the update time, interval and any error from the latest attempt (the last good figures stay on screen).
+ */
+export function renderTickerScreen(ticker: Ticker, previous: Ticker | undefined, status: { intervalMs: number; error?: string; color: boolean }): string {
+  const paint = palette(status.color);
+  const move = previous ? ticker.price - previous.price : 0;
+  const tint = move > 0 ? paint.green : move < 0 ? paint.red : (text: string) => text;
+  const arrow = move > 0 ? '▲' : move < 0 ? '▼' : '•';
+  const change = ticker.change24hPct === undefined ? MISSING : (ticker.change24hPct >= 0 ? paint.green : paint.red)(signedPercent(ticker.change24hPct));
+  const address = `${ticker.pool.address.slice(0, 6)}…${ticker.pool.address.slice(-4)}`;
+  const time = new Date(ticker.updatedAt).toLocaleTimeString('en-GB', { hour12: false });
+  const rows: Array<[string, string]> = [
+    ['24h change', change], ['24h high', formatNumber(ticker.high24h)], ['24h low', formatNumber(ticker.low24h)],
+    ['24h volume', formatUsd(ticker.volume24hUsd)], ['Liquidity', formatUsd(ticker.liquidityUsd)], ['24h trades', ticker.trades24h === undefined ? MISSING : ticker.trades24h.toLocaleString('en-US')],
+  ];
+  return [
+    `${paint.bold(ticker.pair)}  ${paint.dim(`${tickerPool(ticker)} · ${CHAINS[ticker.pool.chainId].name} · ${address}`)}`,
+    '',
+    `  ${tint(paint.bold(`${arrow} ${formatNumber(ticker.price)}`))} ${ticker.priceUnit}${previous && move ? `  ${tint(`${move > 0 ? '+' : ''}${formatNumber(move)}`)}` : ''}`,
+    '',
+    ...rows.map(([label, value]) => `  ${label.padEnd(11)} ${value}`),
+    '',
+    paint.dim(`Updated ${time} · every ${status.intervalMs / 1000}s · GeckoTerminal · q or Ctrl+C to quit`),
+    ...(status.error ? [paint.red(`Last update failed: ${status.error} Showing the previous figures; retrying.`)] : []),
+  ].join('\n');
 }

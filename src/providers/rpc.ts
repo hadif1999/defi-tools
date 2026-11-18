@@ -31,7 +31,8 @@ export class RpcProvider {
   private readonly clients = new Map<EvmChainId, ReturnType<typeof createPublicClient>>();
   constructor(private readonly rpcUrls: Partial<Record<EvmChainId, string>>) {}
 
-  private client(chainId: EvmChainId): ReturnType<typeof createPublicClient> {
+  /** A viem client for the network: the configured RPC URL, or the public default from viem's chain registry. */
+  client(chainId: EvmChainId): ReturnType<typeof createPublicClient> {
     const existing = this.clients.get(chainId);
     if (existing) return existing;
     const url = this.rpcUrls[chainId] ?? chains[chainId].rpcUrls.default.http[0];

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { EvmChainId, LpPosition, Protocol } from '../types.js';
+import type { EvmChainId, Leg, LpPosition, PositionEvent, Protocol, WalletActivity } from '../types.js';
 import { annualize } from '../positions-math.js';
 import { finite, getJson } from './http.js';
 
@@ -16,6 +16,9 @@ const number = z.unknown().transform(finite);
 const usdPrice = z.object({ usd: number }).partial().optional();
 const cashFlowSchema = z.object({
   type: z.string(), timestamp: number, price: number, amount0: number, amount1: number, amount_usd: number,
+  liquidity: z.union([z.string(), z.number()]).transform(String).optional(),
+  /** Gas flows: the fee in the native coin, negative. */
+  amount: number, tx_hash: z.string().optional(),
   prices: z.object({ token0: usdPrice, token1: usdPrice }).partial().optional(),
 });
 const tokenSchema = z.object({ symbol: z.string().optional(), decimals: number, price: number });
@@ -46,7 +49,7 @@ const positionSchema = z.object({
   deposits_value: number,
   withdrawals_value: number,
   first_mint_ts: number,
-  performance: z.object({ usd: z.object({ pnl: number, il: number }).partial().optional() }).partial().optional(),
+  performance: z.object({ usd: z.object({ pnl: number }).partial().optional(), hodl: z.object({ il: number }).partial().optional() }).partial().optional(),
   cash_flows: z.array(z.unknown()).default([]),
 });
 type Row = z.infer<typeof positionSchema>;
@@ -58,11 +61,49 @@ export class RevertClient {
   constructor(private readonly options: RevertOptions = {}) { this.fetcher = options.fetcher ?? fetch; }
 
   /** Every Uniswap v3 and v4 position the address has held, open and closed, on the given networks. */
-  async listPositions(address: string, chains: readonly EvmChainId[]): Promise<LpPosition[]> {
+  async listPositions(address: string, chains: readonly EvmChainId[], options: { events?: boolean } = {}): Promise<LpPosition[]> {
     const lists = await Promise.all((Object.keys(exchanges) as Protocol[]).map(async (protocol) => (await this.pages(address, protocol)).map((row) => [protocol, row] as const)));
     return lists.flat().flatMap(([protocol, row]) => {
       const chainId = networks[row.network.toLowerCase()];
-      return chainId !== undefined && chains.includes(chainId) ? [this.toPosition(row, protocol, chainId, address)] : [];
+      if (chainId === undefined || !chains.includes(chainId)) return [];
+      const position = this.toPosition(row, protocol, chainId, address);
+      return [options.events ? { ...position, ...positionEvents(row.cash_flows) } : position];
+    });
+  }
+
+  /**
+   * Liquidity activity for wallet history: one entry per transaction of each position (adds, removes, fee collects),
+   * with token amounts valued at the time and the gas the wallet paid. Withdrawing and collecting in one transaction
+   * is one "remove-liquidity" entry carrying the fees separately.
+   */
+  async activity(address: string, chains: readonly EvmChainId[]): Promise<WalletActivity[]> {
+    const lists = await Promise.all((Object.keys(exchanges) as Protocol[]).map(async (protocol) => (await this.pages(address, protocol)).map((row) => [protocol, row] as const)));
+    return lists.flat().flatMap(([protocol, row]) => {
+      const chainId = networks[row.network.toLowerCase()];
+      if (chainId === undefined || !chains.includes(chainId)) return [];
+      const symbol = (token: string) => (row.tokens[token] ?? row.tokens[token.toLowerCase()])?.symbol ?? `${token.slice(0, 6)}…`;
+      const pool = `${symbol(row.token0)}/${symbol(row.token1)}${row.fee_tier !== undefined ? ` ${row.fee_tier / 10_000}%` : ''} ${protocol}`;
+      const flows = row.cash_flows.flatMap((flow) => { const parsed = cashFlowSchema.safeParse(flow); return parsed.success && parsed.data.tx_hash ? [parsed.data] : []; });
+      const legs = (flow: (typeof flows)[number]): Leg[] => ([[row.token0, flow.amount0, flow.prices?.token0?.usd], [row.token1, flow.amount1, flow.prices?.token1?.usd]] as const)
+        .filter(([, amount]) => amount !== undefined && amount !== 0)
+        .map(([token, amount, price]) => ({ symbol: symbol(token), address: token.toLowerCase(), amount: Math.abs(amount!), valueUsd: price === undefined ? undefined : Math.abs(amount!) * price }));
+      const byHash = new Map<string, typeof flows>();
+      for (const flow of flows) byHash.set(flow.tx_hash!, [...(byHash.get(flow.tx_hash!) ?? []), flow]);
+      return [...byHash].flatMap(([hash, group]): WalletActivity[] => {
+        const of = (type: string) => group.filter((flow) => flow.type === type).flatMap(legs);
+        const [deposits, withdrawals, fees] = [of('deposits'), of('withdrawals'), of('claimed-fees')];
+        const gas = group.filter((flow) => flow.type === 'gas-costs');
+        const kind = deposits.length ? 'add-liquidity' : withdrawals.length ? 'remove-liquidity' : fees.length ? 'collect-fees' : undefined;
+        if (!kind) return [];
+        const timestamp = Math.max(...group.map((flow) => flow.timestamp ?? 0));
+        return [{
+          chainId, hash, timestamp: new Date(timestamp * 1000).toISOString(), kind, positionId: row.nft_id, pool,
+          sent: deposits, received: kind === 'collect-fees' ? fees : withdrawals, fees: kind === 'remove-liquidity' && fees.length ? fees : undefined,
+          gasNative: gas.length ? gas.reduce((total, flow) => total + Math.abs(flow.amount ?? 0), 0) : undefined,
+          gasUsd: gas.length ? gas.reduce((total, flow) => total + Math.abs(flow.amount_usd ?? 0), 0) : undefined,
+          source: 'revert',
+        }];
+      });
     });
   }
 
@@ -117,6 +158,16 @@ export class RevertClient {
     // PnL in USD: what came out (withdrawals, fees, value still in the position) minus what went in and gas.
     const pnl = deposited !== undefined && withdrawn !== undefined && fees !== undefined && row.underlying_value !== undefined
       ? row.underlying_value + withdrawn + fees - deposited - gas : row.performance?.usd?.pnl;
+    // Impermanent loss: the tokens the position gave back (withdrawals plus what it still holds) minus the tokens deposited,
+    // valued at one set of prices: at the last withdrawal for a closed position (later moves happen to tokens you hold anyway),
+    // today's for an open one. Fees are not included. Revert's performance.usd.il is withdrawals minus deposits at different
+    // times, which also counts the market's move, so it is used only when amounts or prices are missing.
+    const net = (side: 'amount0' | 'amount1', current: number | undefined) => flows.filter((flow) => flow.type === 'deposits' || flow.type === 'withdrawals')
+      .reduce((total, flow) => total + (flow[side] ?? 0), current ?? 0);
+    const [ilPrice0, ilPrice1] = active ? [token0.priceUsd, token1.priceUsd] : [exit?.prices?.token0?.usd, exit?.prices?.token1?.usd];
+    const il = ilPrice0 !== undefined && ilPrice1 !== undefined && flows.some((flow) => flow.type === 'deposits')
+      ? net('amount0', active ? row.current_amount0 : 0) * ilPrice0 + net('amount1', active ? row.current_amount1 : 0) * ilPrice1
+      : row.performance?.hodl?.il;
     const iso = (seconds: number | undefined) => seconds === undefined ? undefined : new Date(seconds * 1000).toISOString();
     return {
       id: row.nft_id, chainId, dex: 'Uniswap', protocol, wallet: (row.owner ?? wallet).toLowerCase(), pool: row.pool,
@@ -128,10 +179,39 @@ export class RevertClient {
       amount0: row.current_amount0, amount1: row.current_amount1, valueUsd: row.underlying_value,
       uncollectedFees0: row.uncollected_fees0, uncollectedFees1: row.uncollected_fees1, uncollectedFeesUsd: uncollected,
       feesEarnedUsd: fees, depositedUsd: deposited, withdrawnUsd: withdrawn, gasUsd: gas,
-      pnlUsd: pnl, ilUsd: row.performance?.usd?.il,
+      pnlUsd: pnl, ilUsd: il,
       feeAprPct: annualize(ratio(fees), days), totalAprPct: annualize(ratio(pnl), days),
       openedAt: iso(row.first_mint_ts), closedAt: iso(closedTs),
       source: 'revert', historyAvailable: true,
     };
   }
+}
+
+/**
+ * A position's transactions from its cash flows: deposits, withdrawals and fee collects, with the gas of the same
+ * transaction. Revert signs deposits negative (tokens leaving the wallet); amounts here are positive.
+ */
+export function positionEvents(raw: unknown[]): { events: PositionEvent[]; depositLiquidity?: string } {
+  const flows = raw.flatMap((flow) => { const parsed = cashFlowSchema.safeParse(flow); return parsed.success ? [parsed.data] : []; });
+  const kinds: Record<string, PositionEvent['kind']> = { deposits: 'deposit', withdrawals: 'withdraw', 'claimed-fees': 'collect' };
+  const gas = new Map<string, number>();
+  for (const flow of flows) if (flow.type === 'gas-costs' && flow.tx_hash) gas.set(flow.tx_hash, (gas.get(flow.tx_hash) ?? 0) + Math.abs(flow.amount_usd ?? 0));
+  const charged = new Set<string>();
+  const events = flows.flatMap((flow): PositionEvent[] => {
+    const kind = kinds[flow.type];
+    if (!kind || flow.timestamp === undefined) return [];
+    const [amount0, amount1] = [Math.abs(flow.amount0 ?? 0), Math.abs(flow.amount1 ?? 0)];
+    const [price0, price1] = [flow.prices?.token0?.usd, flow.prices?.token1?.usd];
+    // A transaction's gas is counted once, on its first event (a withdrawal and a collect can share one).
+    const fee = flow.tx_hash && !charged.has(flow.tx_hash) ? gas.get(flow.tx_hash) : undefined;
+    if (flow.tx_hash) charged.add(flow.tx_hash);
+    return [{
+      kind, timestamp: flow.timestamp, hash: flow.tx_hash, amount0, amount1,
+      price: flow.price ?? (price0 !== undefined && price1 ? price0 / price1 : undefined),
+      valueUsd: price0 === undefined || price1 === undefined ? undefined : amount0 * price0 + amount1 * price1,
+      gasUsd: fee,
+    }];
+  }).sort((a, b) => a.timestamp - b.timestamp);
+  const first = flows.filter((flow) => flow.type === 'deposits' && flow.liquidity && flow.liquidity !== '0').sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))[0];
+  return { events, depositLiquidity: first?.liquidity?.replace(/\.0+$/, '') };
 }

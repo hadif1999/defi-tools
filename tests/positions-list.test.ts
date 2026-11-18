@@ -13,7 +13,7 @@ const env = (directory: string, extra: Record<string, string> = {}) => ({
   DEFI_TOOL_CONFIG: join(directory, 'missing.json'), DEFI_TOOL_DB_PATH: join(directory, 'state.db'), ...extra,
 });
 
-test('positions list shows open and closed positions as two tables, by saved wallet, address, or all saved wallets', async () => {
+test('positions list shows open and closed positions as two tables, by saved wallet, the default wallet, address, or all saved wallets', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'defi-tool-positions-'));
   const requests: string[] = [];
   const server = createServer((request, response) => {
@@ -33,9 +33,9 @@ test('positions list shows open and closed positions as two tables, by saved wal
     assert.match(all.stdout, /Source: Revert Finance \(no API key\)/);
     assert.match(all.stdout, /Open: 1 \(value \$49\.00, unclaimed fees \$0\.54\) · Closed: 2 · Lifetime fees \$7\.13 · PnL -\$0\.70/);
     assert.match(all.stdout, /Open positions \(1\) · largest value first\n#\s+Pool\s+ID\s+Price\s+Range \(min – max\)\s+Unit\s+Status\s+Balance\s+Value\s+Unclaimed\s+Fees earned\s+Fee APR\s+PnL\s+Age/);
-    assert.match(all.stdout, /1\s+WETH\/USDC 0\.3% v3\s+#999\s+2,400\.00\s+2,300\.00 – 2,500\.00\s+USDC per WETH\s+● In range\s+0\.01000 WETH \+ 25\.0000 USDC\s+\$49\.00\s+\$0\.54\s+\$1\.54\s+11\d\.\d\d%\s+\+\$1\.44 \(\+2\.9%\)\s+10d/);
+    assert.match(all.stdout, /1\s+WETH\/USDC 0\.3% v3\s+#999\s+2,400\.00\s+2,300\.00 – 2,500\.00\s+USDC per WETH\s+● In range\s+0\.01000 WETH \+ 25\.0000 USDC\s+\$49\.00\s+\$0\.54\s+\$1\.54\s+\d+\.\d\d%\s+\+\$1\.44 \(\+2\.9%\)\s+\d+d/);
     assert.match(all.stdout, /Closed positions \(2\) · most recently closed first\n#\s+Chain\s+Pool\s+ID\s+Range \(min – max\)\s+Exit price\s+Price now\s+Unit\s+Deposited\s+Withdrawn\s+Fees earned\s+Gas\s+Fee APR\s+PnL\s+IL\s+Opened\s+Closed\s+Held/);
-    assert.match(all.stdout, /1\s+Arbitrum\s+WETH\/USDC 0\.05% v3\s+#5723933\s+2,354\.34 – 2,570\.90\s+2,305\.85\s+2,312\.12\s+USDC per WETH\s+\$78\.36\s+\$74\.54\s+\$2\.79\s+\$0\.04\s+63\.\d+%\s+-\$1\.07 \(-1\.4%\)\s+-\$3\.82\s+2026-10-08\s+2026-10-29\s+20d/);
+    assert.match(all.stdout, /1\s+Arbitrum\s+WETH\/USDC 0\.05% v3\s+#5723933\s+2,354\.34 – 2,570\.90\s+2,305\.85\s+2,312\.12\s+USDC per WETH\s+\$78\.36\s+\$74\.54\s+\$2\.79\s+\$0\.04\s+63\.\d+%\s+-\$1\.07 \(-1\.4%\)\s+-\$1\.28\s+2026-10-08\s+2026-10-29\s+20d/);
     assert.match(all.stdout, /2\s+Ethereum\s+WETH\/USDC 0\.05% v3\s+#1373723/);
     assert.doesNotMatch(all.stdout, /— means/); // Every value is known.
 
@@ -52,20 +52,43 @@ test('positions list shows open and closed positions as two tables, by saved wal
     assert.deepEqual(json.data.active, []);
     assert.deepEqual(json.data.past.map((position: { id: string; chainId: number }) => [position.id, position.chainId]), [['5723933', 42161], ['1373723', 1]]);
 
-    // A saved wallet is read on its saved network only; with no option, every saved wallet (Solana skipped).
+    // A saved EVM wallet is read on every EVM network (--chain narrows it), whatever network it was saved for.
     assert.equal(sync('wallet', 'add', WALLET, '--chain', 'base', '--name', 'ledger').status, 0);
     assert.equal(sync('wallet', 'add', 'So11111111111111111111111111111111111111112', '--chain', 'sol', '--name', 'phantom').status, 0);
     const named = await cli('positions', 'list', '--wallet', 'LEDGER');
-    assert.match(named.stdout, /Uniswap positions · ledger \(0x902e…3f00\) on Base/);
+    assert.match(named.stdout, /Uniswap positions · ledger \(0x902e…3f00\) on all networks/);
     assert.match(named.stdout, /Open positions \(1\)/);
-    assert.match(named.stdout, /Closed positions \(0\)\n  No closed positions\./);
-    const everything = await cli('positions', 'list');
-    assert.match(everything.stdout, /ledger \(0x902e…3f00\) on Base/);
+    assert.match(named.stdout, /Closed positions \(2\)/);
+    const narrowed = await cli('positions', 'list', '--wallet', 'ledger', '--chain', 'base');
+    assert.match(narrowed.stdout, /Closed positions \(0\)\n  No closed positions\./);
+    // Without --wallet: the default wallet. None chosen, so the latest added (Solana) is used, which has no Uniswap positions.
+    const solana = sync('positions', 'list');
+    assert.equal(solana.status, 1);
+    assert.match(solana.stderr, /The default wallet phantom is a Solana wallet/);
+    assert.equal(sync('wallet', 'set-default', 'ledger').status, 0);
+    const byDefault = await cli('positions', 'list');
+    assert.match(byDefault.stderr, /Using the default wallet ledger \(0x902e…3f00\); pass --wallet to choose another/);
+    assert.match(byDefault.stdout, /ledger \(0x902e…3f00\) on all networks/);
+    // positions detail reads the same wallets: the default one, or --wallet.
+    const detail = await cli('positions', 'detail', '1', '--offline', '--no-plot', '--data-dir', join(directory, 'cache'), '--width', '120');
+    assert.match(detail.stderr, /Using the default wallet ledger/);
+    assert.match(detail.stdout, /WETH\/USDC 0\.3%\s+Uniswap v3 · Base · position #999 · ledger/);
+    const byId = await cli('positions', 'detail', '#5723933', '--wallet', 'ledger', '--offline', '--no-plot', '--data-dir', join(directory, 'cache'), '--width', '120');
+    assert.doesNotMatch(byId.stderr, /Using the default wallet/);
+    assert.match(byId.stdout, /position #5723933/);
+    // wallet history all: one entry per saved EVM wallet, Solana skipped.
+    const history = await cli('wallet', 'history', 'all', '--type', 'lp', '--json');
+    const entries = JSON.parse(history.stdout).data;
+    assert.deepEqual(entries.map((entry: { wallets: string[]; address: string }) => [entry.wallets, entry.address]), [[['ledger'], WALLET]]);
+    assert.ok(Array.isArray(entries[0].activities));
+    const createAll = sync('positions', 'create', 'WETH/USDC', '--chain', 'base', '--wallet', 'all', '--amount', '10usd', '--full-range');
+    assert.equal(createAll.status, 1);
+    assert.match(createAll.stderr, /--wallet all is not allowed/);
+    // --wallet all: every saved wallet, Solana skipped.
+    const everything = await cli('positions', 'list', '--wallet', 'all');
+    assert.match(everything.stdout, /ledger \(0x902e…3f00\) on all networks/);
     assert.match(everything.stderr, /Note: skipping phantom \(Solana\)/);
-    assert.equal(requests.filter((url) => url.includes('uniswapv3')).length, 6); // One request per address and run.
-    // The open position is recorded for wallet list.
-    const wallets = JSON.parse(sync('wallet', 'list', '--json').stdout).data;
-    assert.equal(wallets.find((item: { name: string }) => item.name === 'ledger').positions, 1);
+    assert.equal(requests.filter((url) => url.includes('uniswapv3')).length, 11); // One request per address and run.
 
     for (const [args, message] of [
       [['--wallet', 'nobody'], /No saved wallet named "nobody"/],

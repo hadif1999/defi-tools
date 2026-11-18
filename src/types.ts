@@ -174,7 +174,7 @@ export interface LpPosition {
   gasUsd?: number;
   /** Profit or loss in USD: value now + withdrawals + fees earned − deposits − gas, each valued when it happened. */
   pnlUsd?: number;
-  /** Impermanent loss in USD against holding the deposited tokens. */
+  /** Impermanent loss in USD, fees excluded: the tokens the position returned minus the tokens deposited, at the exit prices (closed) or today's (open). */
   ilUsd?: number;
   /** Fees earned / deposits, annualized over the time held, in percent. */
   feeAprPct?: number;
@@ -183,8 +183,27 @@ export interface LpPosition {
   openedAt?: string;
   closedAt?: string;
   source: 'revert' | 'rpc';
+  /** The position's transactions, oldest first; only read for positions detail. */
+  events?: PositionEvent[];
+  /** Liquidity added by the first deposit, as a decimal string (closed positions report 0 today). */
+  depositLiquidity?: string;
   /** False when deposits, withdrawals and collected fees are unknown (on-chain fallback). */
   historyAvailable: boolean;
+}
+
+/** One transaction of a position: tokens added or removed, or fees collected, valued when it happened. */
+export interface PositionEvent {
+  kind: 'deposit' | 'withdraw' | 'collect';
+  /** Unix seconds. */
+  timestamp: number;
+  hash?: string;
+  /** Token amounts, always positive. */
+  amount0: number;
+  amount1: number;
+  /** Pool price at the time, token1 per token0. */
+  price?: number;
+  valueUsd?: number;
+  gasUsd?: number;
 }
 
 /** A wallet saved with defi-tool wallet add. EVM addresses are stored lowercase; Solana addresses keep their case. */
@@ -196,9 +215,41 @@ export interface SavedWallet {
   updatedAt: string;
 }
 
+/** One token moving in or out of a wallet in a transaction; amounts have decimals applied. */
+export interface Leg { symbol: string; /** Token contract; absent for the native coin. */ address?: string; amount: number; valueUsd?: number }
+
+export const ACTIVITY_KINDS = ['swap', 'add-liquidity', 'remove-liquidity', 'collect-fees', 'send', 'receive', 'wrap', 'unwrap', 'other'] as const;
+export type ActivityKind = typeof ACTIVITY_KINDS[number];
+
+/** One wallet transaction for wallet history: what moved, valued at the time it happened. */
+export interface WalletActivity {
+  chainId: EvmChainId;
+  hash: string;
+  timestamp: string;
+  kind: ActivityKind;
+  sent: Leg[];
+  received: Leg[];
+  /** LP fees collected in the transaction (also when liquidity was removed at the same time). */
+  fees?: Leg[];
+  /** The other address for sends and receives. */
+  counterparty?: string;
+  positionId?: string;
+  /** "WETH/USDC 0.05% v3" for liquidity transactions. */
+  pool?: string;
+  /** Fee the wallet paid to send the transaction, in the native coin and USD; absent when another address sent it. */
+  gasNative?: number;
+  gasUsd?: number;
+  /** Received only unknown, unpriced tokens: most likely an unsolicited airdrop. */
+  spam?: boolean;
+  source: 'revert' | 'alchemy';
+  explorerUrl?: string;
+}
+
 export interface AppConfig {
   apiUrl: string;
   apiKey?: string;
+  /** Alchemy key for wallet history (swaps and transfers); never sent anywhere but Alchemy. */
+  alchemyApiKey?: string;
   rpcUrls: Partial<Record<ChainId, string>>;
   chains: ChainId[];
   wallets: string[];

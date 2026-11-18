@@ -20,14 +20,14 @@ function run(args: string[], config = '/nonexistent/defi-tool-test/config.json')
 }
 
 test('root, groups, and subcommands explain themselves without a config or network', () => {
-  for (const path of [[], ['help'], ['pools'], ['positions'], ['alerts'], ['init'], ['chains'], ['pools', 'scan'], ['pools', 'get'], ['pools', 'rank'], ['positions', 'analyze'], ['positions', 'list'], ['alerts', 'check'], ['wallet'], ['wallet', 'add'], ['wallet', 'list'], ['wallet', 'edit'], ['wallet', 'delete']]) {
+  for (const path of [[], ['help'], ['pools'], ['positions'], ['alerts'], ['init'], ['chains'], ['pools', 'scan'], ['pools', 'get'], ['pools', 'rank'], ['positions', 'analyze'], ['positions', 'list'], ['positions', 'create'], ['wallet', 'history'], ['alerts', 'check'], ['wallet'], ['wallet', 'add'], ['wallet', 'list'], ['wallet', 'edit'], ['wallet', 'delete'], ['dex-data'], ['dex-data', 'download'], ['dex-data', 'show'], ['market-data'], ['market-data', 'download'], ['dex-ticker'], ['positions', 'detail']]) {
     const result = run([...path, '--help']);
     assert.equal(result.status, 0, `${path}: ${result.stderr}`);
     assert.match(result.stdout, /defi-tool\b/);
     assert.match(result.stdout, /Examples:/);
-    assert.match(result.stdout, /defi-tool (help|init|chains|pools|positions|alerts|wallet)/);
+    assert.match(result.stdout, /defi-tool (help|init|chains|pools|positions|alerts|wallet|dex-data|market-data|dex-ticker)/);
   }
-  for (const path of [[], ['pools'], ['positions'], ['alerts'], ['wallet']]) {
+  for (const path of [[], ['pools'], ['positions'], ['alerts'], ['wallet'], ['dex-data'], ['market-data']]) {
     const result = run(path);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Usage:/);
@@ -404,8 +404,10 @@ test('wallet commands validate input and keep wallets in the database', () => {
     assert.match(wallet('list').stdout, /No saved wallets/);
     const added = wallet('add', evm, '--chain', 'ETH');
     assert.equal(added.status, 0, added.stderr);
-    assert.match(added.stdout, new RegExp(`Saved wallet0: ${evm.toLowerCase()} on Ethereum`));
+    assert.match(added.stdout, new RegExp(`Saved wallet0: ${evm.toLowerCase()} on Ethereum. It is now the default wallet`));
     assert.equal(wallet('add', 'So11111111111111111111111111111111111111112', '--chain', 'sol', '--name', 'phantom').status, 0);
+    // Without a chosen default, the latest added wallet is the default.
+    assert.match(wallet('set-default').stdout, /Default wallet: phantom .*the latest added/);
     for (const [args, message] of [
       [['add', evm], /required option '--chain/],
       [['add', evm, '--chain', 'all'], /--chain takes one network/],
@@ -416,6 +418,11 @@ test('wallet commands validate input and keep wallets in the database', () => {
       [['edit', 'wallet0'], /Nothing to change/],
       [['edit', 'phantom', '--chain', 'eth'], /not a valid Ethereum address/],
       [['delete', 'missing'], /No saved wallet named "missing"/],
+      [['set-default', 'missing'], /No saved wallet "missing"/],
+      [['add', evm, '--chain', 'base', '--name', 'ALL'], /"all" is reserved: --wallet all means every saved wallet/],
+      [['edit', 'wallet0', '--name', 'all'], /"all" is reserved/],
+      [['set-default', 'all'], /The default is one wallet.*--wallet all/],
+      [['set-default', '9'], /There is no wallet number 9; defi-tool wallet list shows 2 wallets/],
     ] as const) {
       const result = wallet(...args);
       assert.equal(result.status, 1, `${args.join(' ')}: ${result.stdout}`);
@@ -424,11 +431,26 @@ test('wallet commands validate input and keep wallets in the database', () => {
     const edited = wallet('edit', 'WALLET0', '--name', 'my-wallet1', '--chain', 'base');
     assert.equal(edited.status, 0, edited.stderr);
     assert.match(edited.stdout, /Updated wallet0: now my-wallet1, 0xabab.* on Base/);
-    const table = wallet('list').stdout;
-    assert.match(table, /Name\s+Chain\s+Type\s+Address\s+Added \(UTC\)\s+Updated \(UTC\)\s+Positions\s+Last checked \(UTC\)/);
-    assert.match(table, /my-wallet1\s+Base\s+EVM\s+0xabab/);
-    assert.match(table, /phantom\s+Solana\s+Solana\s+So111/);
+    let table = wallet('list', '--no-balance').stdout;
+    assert.match(table, /#\s+Name\s+Default\s+Chain\s+Type\s+Address\s+Added \(UTC\)\s+Updated \(UTC\)\n/);
+    assert.doesNotMatch(table, /Positions/);
+    assert.match(table, /1\s+my-wallet1\s+Base\s+EVM\s+0xabab/);
+    assert.match(table, /2\s+phantom\s+★ latest\s+Solana\s+Solana\s+So111/);
+    // Choose by number, name or address; a rename keeps the choice.
+    assert.match(wallet('set-default', '1').stdout, /Default wallet: my-wallet1 \(0xabab.* on Base\)/);
+    table = wallet('list', '--no-balance').stdout;
+    assert.match(table, /1\s+my-wallet1\s+★ default\s+Base/);
+    assert.match(table, /★ default: my-wallet1, used when a command is run without --wallet/);
+    assert.match(wallet('set-default', 'PHANTOM').stdout, /Default wallet: phantom/);
+    assert.match(wallet('set-default', evm).stdout, /Default wallet: my-wallet1/);
+    assert.equal(wallet('edit', 'my-wallet1', '--name', 'main').status, 0);
+    assert.match(wallet('set-default').stdout, /Default wallet: main \(0xabab.* on Base\)\.$/m);
+    assert.deepEqual(JSON.parse(wallet('list', '--no-balance', '--json').stdout).data.map((item: { name: string; default: boolean }) => [item.name, item.default]), [['main', true], ['phantom', false]]);
+    // Deleting the chosen default falls back to the latest added.
+    assert.match(wallet('rm', 'main').stdout, /Deleted main/);
+    assert.match(wallet('set-default').stdout, /Default wallet: phantom .*the latest added/);
+    assert.equal(wallet('add', evm, '--chain', 'base', '--name', 'my-wallet1').status, 0);
     assert.match(wallet('rm', 'phantom').stdout, /Deleted phantom/);
-    assert.deepEqual(JSON.parse(wallet('list', '--json').stdout).data.map((item: { name: string }) => item.name), ['my-wallet1']);
+    assert.deepEqual(JSON.parse(wallet('list', '--no-balance', '--json').stdout).data.map((item: { name: string }) => item.name), ['my-wallet1']);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
