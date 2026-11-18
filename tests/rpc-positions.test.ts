@@ -88,22 +88,28 @@ test('positions and alerts CLI default to key-free RPC, including alert exit cod
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('positions analyze checks saved wallets on their own network, by name or by default, and wallet list shows balances', async () => {
+test('positions analyze checks saved wallets on their own and saved networks, by name, by default or all, and wallet list shows balances', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'defi-tool-wallets-'));
   try {
     await withRpc('v3', async (_rpc, url) => {
       const config = join(directory, 'config.json');
-      // No init wallets: only the saved wallets are checked. Base has no RPC URL, so a Base wallet would fail and say so.
+      // No init wallets: only saved wallets are checked, on their own network and the saved networks (Base, whose RPC is down).
       // Solana RPC and DefiLlama prices are unreachable: wallet list still shows the ETH read from the fixture node.
-      writeFileSync(config, JSON.stringify({ chains: [8453], rpcUrls: { 1: url, 501: 'http://127.0.0.1:9' }, databasePath: join(directory, 'state.db') }));
+      writeFileSync(config, JSON.stringify({ chains: [8453], rpcUrls: { 1: url, 8453: 'http://127.0.0.1:9', 501: 'http://127.0.0.1:9' }, databasePath: join(directory, 'state.db') }));
       const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('UNISWAP_') && !key.startsWith('DEFI_TOOL_') && !key.startsWith('RPC_URL_'))), DEFI_TOOL_CONFIG: config, DEFI_TOOL_PRICES_URL: 'http://127.0.0.1:9' };
       const cli = (...args: string[]) => promisify(execFile)(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], { env, timeout: 10_000 });
       await cli('wallet', 'add', wallet, '--chain', 'eth', '--name', 'main');
       await cli('wallet', 'add', 'So11111111111111111111111111111111111111112', '--chain', 'sol');
       const named = await cli('positions', 'analyze', '--wallet', 'MAIN', '--json');
       assert.deepEqual(JSON.parse(named.stdout).data.map((item: { chainId: number; wallet: string }) => [item.chainId, item.wallet]), [[1, wallet]]);
-      // Without --wallet: every saved wallet on its network; the Solana one is skipped with a note.
-      const all = await cli('positions', 'analyze', '--json');
+      assert.match(named.stderr, /on Base:/);
+      // Without --wallet: the default wallet, here the latest added (Solana), which has no Uniswap positions.
+      await assert.rejects(cli('positions', 'analyze', '--json'), /EVM chains only, not Solana/);
+      await cli('wallet', 'set-default', 'main');
+      const byDefault = await cli('positions', 'analyze');
+      assert.match(byDefault.stderr, /Using the default wallet main/);
+      // --wallet all: every saved wallet; the Solana one is skipped with a note.
+      const all = await cli('positions', 'analyze', '--wallet', 'all', '--json');
       assert.equal(JSON.parse(all.stdout).data.length, 1);
       assert.match(all.stderr, /skipping Solana/);
       const listed = JSON.parse((await cli('wallet', 'list', '--json')).stdout).data;
@@ -111,8 +117,8 @@ test('positions analyze checks saved wallets on their own network, by name or by
       assert.deepEqual(listed[0].balance.holdings, [{ symbol: 'ETH', amount: 0.5 }]); // No price, so no USD value.
       assert.match(listed[1].balanceError, /Solana RPC|fetch failed|ECONNREFUSED/);
       const table = await cli('wallet', 'list');
-      assert.match(table.stdout, /Name\s+Chain\s+Type\s+Address\s+Balance\s+Holdings\s+Added \(UTC\)/);
-      assert.match(table.stdout, /main\s+Ethereum\s+EVM\s+0x0+1\s+—\s+0\.5000 ETH/);
+      assert.match(table.stdout, /#\s+Name\s+Default\s+Chain\s+Type\s+Address\s+Balance\s+Holdings\s+Added \(UTC\)/);
+      assert.match(table.stdout, /main\s+★ default\s+Ethereum\s+EVM\s+0x0+1\s+—\s+0\.5000 ETH/);
       assert.match(table.stdout, /wallet0\s+Solana\s+Solana\s+So1+\w*\s+—\s+unavailable/);
       assert.match(table.stderr, /Balances unavailable: wallet0/);
     });

@@ -50,6 +50,7 @@ export class Store {
         name TEXT PRIMARY KEY COLLATE NOCASE, address TEXT NOT NULL, chain_id INTEGER NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, checked_at TEXT, UNIQUE(address, chain_id)
       );
+      CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS scan_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT, command TEXT NOT NULL,
         started_at TEXT NOT NULL, completed_at TEXT, warnings TEXT NOT NULL DEFAULT '[]'
@@ -133,6 +134,26 @@ export class Store {
     return (this.db.prepare('SELECT * FROM wallets ORDER BY created_at, rowid').all() as WalletRow[]).map(toWallet);
   }
 
+  /**
+   * The default wallet for commands run without --wallet: the one chosen with wallet set-default, or else the most
+   * recently added wallet. `chosen` says which.
+   */
+  defaultWallet(): { wallet: SavedWallet; chosen: boolean } | undefined {
+    const row = this.db.prepare("SELECT value FROM settings WHERE key='default_wallet'").get() as { value: string } | undefined;
+    const chosen = row && this.wallet(row.value);
+    if (chosen) return { wallet: chosen, chosen: true };
+    const latest = this.db.prepare('SELECT * FROM wallets ORDER BY created_at DESC, rowid DESC LIMIT 1').get() as WalletRow | undefined;
+    return latest && { wallet: toWallet(latest), chosen: false };
+  }
+
+  /** Make a saved wallet the default; returns it. */
+  setDefaultWallet(name: string): SavedWallet {
+    const wallet = this.wallet(name);
+    if (!wallet) throw new Error(`No saved wallet named "${name}". Run defi-tool wallet list to see your wallets.`);
+    this.db.prepare("INSERT INTO settings(key, value) VALUES('default_wallet', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(wallet.name);
+    return wallet;
+  }
+
   /** The first free default name: wallet0, wallet1, ... */
   nextWalletName(): string {
     for (let index = 0; ; index += 1) if (!this.wallet(`wallet${index}`)) return `wallet${index}`;
@@ -145,12 +166,17 @@ export class Store {
     const next = { ...current, name: changes.name ?? current.name, chainId: changes.chainId ?? current.chainId };
     this.assertWalletFree(next, current.name);
     this.db.prepare('UPDATE wallets SET name=?, chain_id=?, updated_at=? WHERE name=?').run(next.name, next.chainId, now, current.name);
+    // A renamed default stays the default.
+    this.db.prepare("UPDATE settings SET value=? WHERE key='default_wallet' AND value=? COLLATE NOCASE").run(next.name, current.name);
     return this.wallet(next.name)!;
   }
 
-  /** Remove a saved wallet; its position history stays. Returns false when no wallet has that name. */
+  /** Remove a saved wallet; its position history stays. Returns false when no wallet has that name. A deleted default is unset. */
   deleteWallet(name: string): boolean {
-    return Number(this.db.prepare('DELETE FROM wallets WHERE name=?').run(name).changes) > 0;
+    const deleted = Number(this.db.prepare('DELETE FROM wallets WHERE name=?').run(name).changes) > 0;
+    // Deleting the chosen default falls back to the most recently added wallet.
+    if (deleted) this.db.prepare("DELETE FROM settings WHERE key='default_wallet' AND value=? COLLATE NOCASE").run(name);
+    return deleted;
   }
 
   private assertWalletFree(wallet: Pick<SavedWallet, 'name' | 'address' | 'chainId'>, except?: string): void {

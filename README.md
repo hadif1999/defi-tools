@@ -83,7 +83,8 @@ defi-tool pools rank --chain eth,arb --top 10
 `positions list` shows your Uniswap v3 and v4 LP positions as two tables: **open** positions (still providing liquidity) and **closed** ones (all liquidity withdrawn).
 
 ```bash
-defi-tool positions list                                   # every saved wallet, each on its saved network
+defi-tool positions list                                   # the default wallet, on every network (see Wallets)
+defi-tool positions list --wallet all                      # every saved wallet
 defi-tool positions list --wallet my-wallet1               # saved wallet(s) by name; the network comes from the wallet
 defi-tool positions list --wallet-addr 0xYourWallet        # any address, on every network
 defi-tool positions list --wallet-addr 0xYourWallet --chain base,arb --past --top 10
@@ -111,7 +112,7 @@ Closed positions (4) · most recently closed first
 - **Closed table:** range, exit price (pool price at the last withdrawal), price now, deposited, withdrawn, fees earned, gas, fee APR, PnL, impermanent loss (IL), opened and closed dates and time held, most recently closed first.
 - **Prices** use a stablecoin, then the wrapped native coin, as the quote when the pair has one (`USDC per WETH`, `WETH per AAVE`); the Unit column says which.
 - **Figures:** deposits, withdrawals, fees and gas are valued in USD at the time each happened. PnL = value now + withdrawals + fees − deposits − gas. Fee APR = fees earned ÷ deposits, annualized over the time held. IL (impermanent loss) compares the position with holding the deposited tokens, fees excluded: the tokens it returned minus the tokens deposited, both valued at the exit price for a closed position (later price moves affect the tokens either way) or today's price for an open one. It is not withdrawals minus deposits, which also counts the market's move; Revert's own `il` figure is that, so it is used only when amounts or prices are missing.
-- **Options:** `--active` or `--past` shows one table (both by default). `--top` limits each table (default 100, up to 1000). `--chain` narrows the networks. `--wallet` takes saved names (see [Wallets](#wallets)), each read only on its saved network; `--wallet-addr` takes addresses, read on every network. Without either, every saved wallet is read, plus addresses saved by `init`. Solana wallets are skipped with a note. `--json` prints `{ "data": { "active": [...], "past": [...] } }`.
+- **Options:** `--active` or `--past` shows one table (both by default). `--top` limits each table (default 100, up to 1000). `--chain` narrows the networks. `--wallet` takes saved names (see [Wallets](#wallets)) or `all`; `--wallet-addr` takes addresses. Both are read on every EVM network, whatever network a wallet was saved for: an EVM address is the same account everywhere, and Revert answers for all networks in one request. Without either, the **default wallet** is read (see `wallet set-default`), or the addresses saved by `init` when no wallet is saved. Solana wallets are skipped with a note. `--json` prints `{ "data": { "active": [...], "past": [...] } }`.
 - **Data source:** [Revert Finance](https://revert.finance)'s public positions API, without a key: one request per address finds open and closed positions on every network, with their full history. Uniswap's own APIs do not list positions (the Trading API key is not used), and free public RPCs cannot search an address's history on L2s. Revert is a third-party service: its data can lag by a few minutes.
 - **Fallback:** if Revert cannot be reached (or with `--source rpc`), the position NFTs the wallet still holds are read over public RPC, with USD prices from DefiLlama: price, range, status, balance and unclaimed fees are shown, but deposits, fees collected, PnL and dates are not, and burned NFTs are missed. Columns without any value are left out. `--source revert` fails instead of falling back. On-chain reads cover v3; v4 NFTs cannot be enumerated without an indexer.
 - No private key is ever requested.
@@ -123,10 +124,11 @@ defi-tool positions detail 1                          # row 1 of positions list 
 defi-tool positions detail 2 --past                   # row 2 of the closed table
 defi-tool positions detail '#5723933' --output html   # by NFT ID, as an interactive report in the browser
 defi-tool positions detail 5723933 --no-plot          # tables only, no charts
+defi-tool positions detail 1 --wallet my-wallet1      # a position of another saved wallet (default: the default wallet)
 defi-tool positions detail 1 --json                   # the whole analysis and its candles
 ```
 
-The argument is an NFT ID (`#5723933` or `5723933`) or a row number of `positions list`; an ID wins when both could match, and `--chain` picks between the same ID on two networks. Wallets are chosen as for `list` (`--wallet`, `--wallet-addr`, `--chain`, `--source`). `detail` is also available as `show`.
+The argument is an NFT ID (`#5723933` or `5723933`) or a row number of `positions list`; an ID wins when both could match, and `--chain` picks between the same ID on two networks. The wallet is the default wallet unless `--wallet` (saved names, or `all`) or `--wallet-addr` names others, read as for `list` (`--chain`, `--source` too). `detail` is also available as `show`.
 
 ```text
 WETH/USDC 0.05%  Uniswap v3 · Arbitrum · position #5723933 · 0x902e…3f00
@@ -187,13 +189,15 @@ defi-tool positions create --pool 0xPoolAddress --chain base --wallet my-wallet 
 
 ## Wallets
 
-Save wallets once by name, then refer to them in `positions` and `alerts`:
+Save wallets once by name, then refer to them in `positions` and `alerts`, or set one as the default so you can leave out `--wallet`:
 
 ```bash
 defi-tool wallet add 0xYourWallet --chain eth                 # saved as wallet0 (then wallet1, ...)
 defi-tool wallet add 0xYourWallet --chain base --name my-wallet1
 defi-tool wallet add YourSolanaAddress --chain sol --name phantom
-defi-tool wallet list                                         # table with balances; --no-balance, --json
+defi-tool wallet list                                         # table with balances and the default marked; --no-balance, --json
+defi-tool wallet set-default my-wallet1                       # or its number in wallet list, or its address
+defi-tool wallet set-default                                  # show the current default
 defi-tool wallet history ledger1                               # latest transactions (see Wallet history)
 defi-tool wallet edit my-wallet1 --name base-main             # rename; --chain moves it to another network
 defi-tool wallet delete base-main                             # alias: wallet rm
@@ -204,7 +208,8 @@ defi-tool positions list --wallet wallet0,base-main            # see Your positi
 - Names have up to 30 letters, digits, `.`, `_` or `-`, and ignore letter case (`wallet edit MAIN` finds `main`). Without `--name`, the first free `wallet0`, `wallet1`, ... is used. A name and an address/network pair can each be saved only once.
 - `wallet list` shows each wallet's name, network, type (EVM/Solana), address, live balance, and when it was added and last edited. **Balance** is the USD value at DefiLlama prices; **Holdings** lists the native coin plus well-known tokens with a balance (WETH, USDC, cbBTC, wstETH, ... on Base and Arbitrum; native coin only elsewhere; SOL only on Solana, via its public RPC or `rpcUrls["501"]` in the configuration). A wallet that cannot be read shows `—`, with the reason on stderr. `--no-balance` skips the network requests; `--json` adds `balance` (or `balanceError`) to each wallet.
 - `wallet delete` removes only the saved wallet; position and alert history stays in the database. To change an address, delete the wallet and add it again.
-- `positions list --wallet` takes saved names, each read on its saved network (`--wallet-addr` takes addresses). `positions analyze` and `alerts` accept saved names or addresses in `--wallet`. A saved wallet is checked on its own network unless `--chain` is given; an address uses `--chain` or the networks saved by `init`. Without `--wallet`, every saved wallet is checked, plus any addresses saved by `init` or `DEFI_TOOL_WALLETS`. Solana wallets are skipped with a note, because positions are Uniswap NFTs on EVM networks.
+- **Default wallet:** every command that takes `--wallet` uses the default wallet when it is left out: `positions list`, `detail`, `analyze` and `create`, `alerts check`, and `wallet history`. The default is the wallet chosen with `wallet set-default` (by name, by its `#` in `wallet list`, or by address, with `--chain` if the address is saved on several networks); until you choose one, it is the most recently added wallet. Renaming the default keeps it; deleting it falls back to the most recently added. Commands say on stderr which default they used. `wallet list` marks it `★ default` (or `★ latest` when none was chosen), and `--json` adds `"default": true`. `--wallet all` still reads every saved wallet, plus addresses saved by `init` or `DEFI_TOOL_WALLETS`. With no saved wallets, the `init` addresses are used as before.
+- **Networks:** `positions list` and `detail` read a saved EVM wallet (`--wallet`, or the default) on every EVM network, as `--wallet-addr` addresses; `--chain` narrows them. `positions analyze` and `alerts`, which read each network over RPC, check a saved wallet on `--chain`, or on the networks saved by `init` plus the wallet's own network; an address uses `--chain` or the networks saved by `init`. Solana wallets are skipped with a note, because positions are Uniswap NFTs on EVM networks.
 - Wallets live in the SQLite database (`wallets` table), next to the cache: `~/.local/share/defi-tool/state.db` or `DEFI_TOOL_DB_PATH`. Only public addresses are stored.
 
 ## Wallet history
@@ -212,6 +217,7 @@ defi-tool positions list --wallet wallet0,base-main            # see Your positi
 `wallet history` lists a wallet's latest transactions as a table: swaps, liquidity adds and removes, fee collects, sends, receives, and wraps. Each row shows what moved, its USD value when it happened, and the gas paid.
 
 ```bash
+defi-tool wallet history                                     # the default wallet, on its saved network, last 30 days
 defi-tool wallet history ledger1                             # the saved wallet's network, last 30 days
 defi-tool wallet history ledger1 --chain base,arb --days 90
 defi-tool wallet history ledger1 --type swap --top 20

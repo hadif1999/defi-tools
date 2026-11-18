@@ -348,20 +348,20 @@ const positions = app.command('positions').description('List your Uniswap LP pos
 commandHelp(positions, ['defi-tool positions list', 'defi-tool positions create WETH/USDC --chain base --wallet main --amount 100usd --lower-limit -15% --upper-limit +10%', 'defi-tool positions list --wallet wallet0', 'defi-tool positions list --wallet-addr 0xYourWallet --past', 'defi-tool positions detail 1 --output html', 'defi-tool positions analyze --wallet 0xYourWallet --chain eth'], [
   'list shows open and closed positions with prices, ranges, balances, fees, APR and PnL. detail analyses one in depth, with charts. analyze checks range status only (used by alerts).',
   'create builds the transactions for a new v3 position on Base or Arbitrum for your wallet to sign; it never signs or sends.',
-  'Uses wallets saved with defi-tool wallet add (each on its network) or init, or pass --wallet; list also takes --wallet-addr. ls is an alias for list.',
+  'Without --wallet they use the default wallet (defi-tool wallet set-default; else the latest added); --wallet all uses every saved wallet. list and detail also take --wallet-addr. ls is an alias for list.',
 ]);
 positions.action(() => positions.outputHelp());
 const list = positions.command('list').alias('ls')
   .description('Show open and closed Uniswap positions with price, range, balance, fees earned, APR and PnL, as two tables.')
-  .option('--wallet <names>', 'saved wallet name(s), comma-separated; each is read on its saved network (default: all saved wallets)')
+  .option('--wallet <names>', 'saved wallet name(s), comma-separated, read on every EVM network; or all for every saved wallet (default: the default wallet, see wallet set-default)')
   .option('--wallet-addr <addresses>', 'wallet address(es), comma-separated; read on every network unless --chain is given')
-  .option('--chain <names>', 'only these networks, e.g. eth,base (default: each saved wallet\'s network; every network for --wallet-addr)')
+  .option('--chain <names>', 'only these networks, e.g. eth,base (default: every EVM network)')
   .option('--active', 'show only open positions')
   .option('--past', 'show only closed positions')
   .option('--top <count>', 'rows per table, 1-1000 (default: 100)')
   .addOption(choiceOption('--source <provider>', 'auto = Revert Finance, falling back to on-chain reads; revert; rpc = on-chain only (no history)', ['auto', 'revert', 'rpc']).default('auto'))
   .option('--json', 'print structured JSON instead of tables');
-commandHelp(list, ['defi-tool positions list', 'defi-tool positions list --wallet my-wallet1', 'defi-tool positions list --wallet-addr 0xYourWallet', 'defi-tool positions list --wallet-addr 0xYourWallet --chain base --past --top 10', 'defi-tool positions list --active --json'], [
+commandHelp(list, ['defi-tool positions list', 'defi-tool positions list --wallet my-wallet1', 'defi-tool positions list --wallet all', 'defi-tool positions list --wallet-addr 0xYourWallet', 'defi-tool positions list --wallet-addr 0xYourWallet --chain base --past --top 10', 'defi-tool positions list --active --json'], [
   'Open positions still provide liquidity; closed ones have withdrawn it all. Both are shown unless --active or --past is given.',
   'Data: Revert Finance\'s public positions API (no key), which keeps each position\'s deposits, withdrawals, fees and PnL.',
   'If it is unreachable, position NFTs the wallet still holds are read over RPC instead, with prices from DefiLlama but no history.',
@@ -374,7 +374,7 @@ list.action(async (options: { wallet?: string; walletAddr?: string; chain?: stri
   if (top > 1000) throw new Error('--top supports 1 through 1000 positions per table.');
   const store = new Store(config.databasePath);
   try {
-    const groups = walletGroups(options.wallet, options.walletAddr, parseChains(options.chain), config, store);
+    const groups = walletGroups(options.wallet, options.walletAddr, parseChains(options.chain), config, store, options.json);
     if (!groups.length) throw new Error('No wallets to read. Save one with defi-tool wallet add 0xYourWallet --chain eth, or pass --wallet-addr 0xYourWallet.');
     const rpc = new RpcProvider(config.rpcUrls);
     const revert = new RevertClient({ endpoint: process.env.DEFI_TOOL_REVERT_URL });
@@ -396,10 +396,10 @@ list.action(async (options: { wallet?: string; walletAddr?: string; chain?: stri
 
 const analyze = dataOptions(positions.command('analyze')
   .description('Check whether price is inside each position\'s liquidity range.')
-  .option('--wallet <names|addresses>', 'saved wallet name(s) or address(es), separated by commas (default: saved wallets)')
+  .option('--wallet <names|addresses>', 'saved wallet name(s) or address(es), comma-separated, or all (default: the default wallet, see wallet set-default)')
   .option('--position <ids>', 'specific NFT token ID(s), comma-separated; required for public v4 reads'));
 commandHelp(analyze, ['defi-tool positions analyze', 'defi-tool positions analyze --wallet my-wallet1', 'defi-tool positions analyze --wallet 0xYourWallet --chain eth,arb', 'defi-tool positions analyze --wallet 0xYourWallet --protocol v4 --chain base --position 123 --json'], [
-  'A saved wallet is checked on its own network unless --chain is given; an address uses --chain or the networks saved by init.',
+  'Wallets are checked on --chain, or on the networks saved by init (plus a saved wallet\'s own network). Without --wallet, the default wallet is checked.',
   'Near a boundary means within 10% of the tick range by default; configure saturationThresholdPct to change it.',
   'Public v3 discovery uses RPC, without keys. Public v4 requires --position and one wallet/network.',
   'Public RPC defaults are included; custom RPC_URL_* values are optional. Zero-liquidity NFTs are skipped.',
@@ -410,7 +410,7 @@ const create = positions.command('create')
   .description('Plan a new Uniswap v3 position and build its transactions for your wallet to sign. Nothing is signed or sent.')
   .argument('[pair]', 'two tokens joined by /, e.g. WETH/USDC (symbols or addresses; ETH means WETH)')
   .requiredOption('--chain <name>', `network: ${CREATE_CHAINS.map((chain) => CHAINS[chain].slug).join(' or ')}`)
-  .requiredOption('--wallet <name|address>', 'saved wallet name or 0x address that will sign, pay and receive the position NFT')
+  .option('--wallet <name|address>', 'saved wallet name or 0x address that will sign, pay and receive the position NFT (default: the default wallet, see wallet set-default)')
   .requiredOption('--amount <amount>', 'deposit: a USD total (100usd, $100), one token\'s amount (0.05weth, 150usdc; the other token follows from the range), or max')
   .option('--lower-limit <limit>', 'lower end of the range: percent from the current price (-15%) or a price in the shown unit (2100)')
   .option('--upper-limit <limit>', 'upper end of the range: percent from the current price (+10%) or a price (2600)')
@@ -436,7 +436,7 @@ commandHelp(create, [
   'A volatility check from 30 days of prices estimates how soon a typical move leaves the range. Only Base and Arbitrum, Uniswap v3, for now.',
   'Ledger wallet-cli cannot send contract calls on Base or Arbitrum; use mm, or --signer raw with a wallet that can.',
 ]);
-create.action(async (pair: string | undefined, options: { chain: string; wallet: string; amount: string; lowerLimit?: string; upperLimit?: string; fullRange?: boolean; fee?: string; pool?: string; slippage: string; deadline: string; payWith: 'auto' | 'weth' | 'eth'; approve: 'exact' | 'unlimited'; signer: Signer; json?: boolean }) => {
+create.action(async (pair: string | undefined, options: { chain: string; wallet?: string; amount: string; lowerLimit?: string; upperLimit?: string; fullRange?: boolean; fee?: string; pool?: string; slippage: string; deadline: string; payWith: 'auto' | 'weth' | 'eth'; approve: 'exact' | 'unlimited'; signer: Signer; json?: boolean }) => {
   const config = await loadConfig(configPath());
   const chainId = parseWalletChain(options.chain);
   if (!isEvmChain(chainId) || !CREATE_CHAINS.includes(chainId)) throw new Error(`positions create supports ${CREATE_CHAINS.map((chain) => CHAINS[chain].name).join(' and ')} for now.`);
@@ -453,9 +453,10 @@ create.action(async (pair: string | undefined, options: { chain: string; wallet:
   const store = new Store(config.databasePath);
   let wallet: string;
   try {
-    const saved = store.wallet(options.wallet);
-    if (saved && !isEvmChain(saved.chainId)) throw new Error(`Saved wallet "${saved.name}" is a Solana wallet; positions are on EVM networks.`);
-    wallet = saved?.address ?? options.wallet.trim();
+    const saved = options.wallet === undefined ? defaultWallet(store, Boolean(options.json)) : store.wallet(options.wallet);
+    if (options.wallet === undefined && !saved) throw new Error('No wallet to plan for: pass --wallet 0xYourWallet, or save one with defi-tool wallet add 0xYourWallet --chain base.');
+    if (saved && !isEvmChain(saved.chainId)) throw new Error(`Saved wallet "${saved.name}" is a Solana wallet; positions are on EVM networks. Pass --wallet${options.wallet === undefined ? ', or set an EVM default with defi-tool wallet set-default' : ''}.`);
+    wallet = saved?.address ?? options.wallet!.trim();
   } finally { store.close(); }
   if (!/^0x[0-9a-fA-F]{40}$/.test(wallet)) throw new Error(`--wallet "${options.wallet}" is neither a saved wallet name nor a 0x address.`);
   const plan = await planPosition({
@@ -471,7 +472,7 @@ create.action(async (pair: string | undefined, options: { chain: string; wallet:
 const detail = positions.command('detail').alias('show')
   .description('Analyse one position in depth: range, entry and exit, holdings, fees, PnL, impermanent loss, time in range, what-if prices and its transactions, with charts.')
   .argument('<position>', 'NFT ID (#5723933 or 5723933), or a row number of defi-tool positions list (open positions; closed ones with --past or when none are open)')
-  .option('--wallet <names>', 'saved wallet name(s), comma-separated (default: all saved wallets)')
+  .option('--wallet <names>', 'saved wallet name(s) holding the position, comma-separated, or all (default: the default wallet, see wallet set-default)')
   .option('--wallet-addr <addresses>', 'wallet address(es), comma-separated; read on every network unless --chain is given')
   .option('--chain <names>', 'only these networks, e.g. base (needed when the same ID exists on two networks)')
   .option('--past', 'a row number counts closed positions instead of open ones')
@@ -491,6 +492,7 @@ commandHelp(detail, [
   'defi-tool positions detail 1',
   "defi-tool positions detail '#5723933' --output html",
   'defi-tool positions detail 2 --past --no-plot',
+  'defi-tool positions detail 1 --wallet my-wallet1',
   'defi-tool positions detail 5723933 --wallet-addr 0xYourWallet --chain arb --json',
 ], [
   'The report: status and a range gauge, a price chart with the range, entry, exit, breakeven and every transaction, the position\'s value against price',
@@ -509,7 +511,7 @@ detail.action(async (reference: string, options: {
   const store = new Store(config.databasePath);
   let portfolio: Awaited<ReturnType<typeof loadPortfolio>>;
   try {
-    const groups = walletGroups(options.wallet, options.walletAddr, parseChains(options.chain), config, store);
+    const groups = walletGroups(options.wallet, options.walletAddr, parseChains(options.chain), config, store, options.json);
     if (!groups.length) throw new Error('No wallets to read. Save one with defi-tool wallet add 0xYourWallet --chain eth, or pass --wallet-addr 0xYourWallet.');
     progress('Reading positions…');
     portfolio = await loadPortfolio(groups, options.source, { revert: new RevertClient({ endpoint: process.env.DEFI_TOOL_REVERT_URL }), rpc: new RpcProvider(config.rpcUrls), pricesUrl: process.env.DEFI_TOOL_PRICES_URL },
@@ -589,7 +591,7 @@ commandHelp(alerts, ['defi-tool alerts check', 'defi-tool alerts check --wallet 
 alerts.action(() => alerts.outputHelp());
 const check = dataOptions(alerts.command('check')
   .description('Check wallet positions and report new boundary or out-of-range alerts.')
-  .option('--wallet <names|addresses>', 'saved wallet name(s) or address(es), separated by commas (default: saved wallets)')
+  .option('--wallet <names|addresses>', 'saved wallet name(s) or address(es), comma-separated, or all (default: the default wallet, see wallet set-default)')
   .option('--position <ids>', 'specific NFT token ID(s), comma-separated; required for public v4 reads'));
 commandHelp(check, ['defi-tool alerts check', 'defi-tool alerts check --wallet my-wallet1', 'defi-tool alerts check --wallet 0xYourWallet --chain eth,arb', 'defi-tool alerts check --wallet 0xYourWallet --chain base --protocol v4 --position 123 --json'], [
   'Exit codes: 0 = no new alerts, 2 = new alerts found, 1 = command failed.',
@@ -605,7 +607,7 @@ for (const command of [analyze, check]) command.action(async (options) => {
   try {
     // Positions are Uniswap NFTs on EVM chains; Solana (Raydium) is for pool listings only.
     const requested = parseChains(options.chain);
-    const targets = walletTargets(options.wallet, requested, config, store);
+    const targets = walletTargets(options.wallet, requested, config, store, Boolean(options.json));
     if (!targets.length) throw new Error('No wallets saved. Run defi-tool wallet add 0xYourAddress --chain eth, or pass --wallet 0xYourAddress.');
     const checks = targets.filter((target) => isEvmChain(target.chainId));
     if (!checks.length) throw new Error('Positions are read for Uniswap on EVM chains only, not Solana. Choose an EVM wallet or --chain, e.g. --chain eth.');
@@ -652,34 +654,56 @@ for (const command of [analyze, check]) command.action(async (options) => {
 });
 
 /**
- * The wallet/network pairs to check. A saved wallet name uses its own network and an address the networks saved by init,
- * unless --chain is given. Without --wallet, every saved wallet and every init wallet is checked. A Solana wallet stays on Solana.
+ * The wallet/network pairs to check. Saved EVM wallets and addresses are read on --chain, or on the saved networks (a
+ * saved wallet's own network included); a Solana wallet stays on Solana. Without --wallet the default wallet is used
+ * (see wallet set-default), or the addresses saved by init when no wallet is saved; --wallet all checks every wallet.
  */
-function walletTargets(value: string | undefined, chains: ChainId[] | undefined, config: AppConfig, store: Store): Array<{ address: string; chainId: ChainId }> {
+function walletTargets(value: string | undefined, chains: ChainId[] | undefined, config: AppConfig, store: Store, quiet = false): Array<{ address: string; chainId: ChainId }> {
   const targets: Array<{ address: string; chainId: ChainId }> = [];
   const add = (address: string, networks: ChainId[]) => {
     for (const chainId of networks) if (!targets.some((target) => target.address === address && target.chainId === chainId)) targets.push({ address, chainId });
   };
-  const addSaved = (wallet: SavedWallet) => add(wallet.address, chains && isEvmChain(wallet.chainId) ? chains : [wallet.chainId]);
+  const addSaved = (wallet: SavedWallet) => add(wallet.address, !isEvmChain(wallet.chainId) ? [wallet.chainId] : chains ?? [...new Set([wallet.chainId, ...config.chains.filter(isEvmChain)])]);
+  const addInit = () => { for (const address of parseWallets(config.wallets.join(','))) add(address, chains ?? config.chains); };
   if (value === undefined) {
+    const saved = defaultWallet(store, quiet);
+    if (saved) addSaved(saved);
+    else addInit();
+    return targets;
+  }
+  if (value.trim().toLowerCase() === 'all') {
     store.wallets().forEach(addSaved);
-    for (const address of parseWallets(config.wallets.join(','))) add(address, chains ?? config.chains);
+    addInit();
     return targets;
   }
   for (const entry of value.split(',').map((item) => item.trim()).filter(Boolean)) {
     const saved = store.wallet(entry);
     if (saved) addSaved(saved);
     else if (/^0x[0-9a-fA-F]{40}$/.test(entry)) add(entry.toLowerCase(), chains ?? config.chains);
-    else throw new Error(`--wallet "${entry}" is neither a saved wallet name nor a 0x address with 40 hexadecimal characters. Run defi-tool wallet list to see saved names.`);
+    else throw new Error(`--wallet "${entry}" is neither a saved wallet name nor a 0x address with 40 hexadecimal characters. Run defi-tool wallet list to see saved names, or use --wallet all.`);
   }
   return targets;
 }
 
 /**
- * Addresses and networks for positions list. Saved wallets (--wallet, or all of them by default) are read on their saved
- * network; --wallet-addr addresses on every EVM network. --chain narrows both. Wallets sharing an address are read together.
+ * The default wallet for a command run without --wallet: the one set with wallet set-default, else the most recently
+ * added. Says which on stderr (unless quiet), since results depend on it.
  */
-function walletGroups(names: string | undefined, addresses: string | undefined, chains: ChainId[] | undefined, config: AppConfig, store: Store): WalletGroup[] {
+function defaultWallet(store: Store, quiet = false): SavedWallet | undefined {
+  const found = store.defaultWallet();
+  if (found && !quiet) {
+    console.error(`Using the default wallet ${found.wallet.name} (${shortAddress(found.wallet.address)})${found.chosen ? '' : ', the latest added'}; pass --wallet to choose another, or set one with defi-tool wallet set-default.`);
+  }
+  return found?.wallet;
+}
+
+/**
+ * Addresses and networks for positions list and detail. A saved EVM wallet is read on every EVM network (an address is
+ * the same account everywhere, and Revert answers for all of them at once), as are --wallet-addr addresses; --chain
+ * narrows both. Without either option the default wallet is read (see wallet set-default), or the addresses saved by
+ * init when no wallet is saved; --wallet all reads every saved wallet. Wallets sharing an address are read together.
+ */
+function walletGroups(names: string | undefined, addresses: string | undefined, chains: ChainId[] | undefined, config: AppConfig, store: Store, quiet = false): WalletGroup[] {
   const groups = new Map<string, WalletGroup>();
   const evmChains = (Object.keys(CHAINS).map(Number) as ChainId[]).filter(isEvmChain);
   const narrow = (networks: ChainId[]) => networks.filter((chain): chain is EvmChainId => isEvmChain(chain) && (!chains || chains.includes(chain)));
@@ -695,13 +719,16 @@ function walletGroups(names: string | undefined, addresses: string | undefined, 
   const skipped: string[] = [];
   const addSaved = (saved: SavedWallet) => {
     if (!isEvmChain(saved.chainId)) return skipped.push(`${saved.name} (Solana)`);
-    if (!narrow([saved.chainId]).length) return skipped.push(`${saved.name} (${CHAINS[saved.chainId].name}, not in --chain)`);
-    add(saved.address, narrow([saved.chainId]), saved.name);
+    add(saved.address, narrow(evmChains), saved.name);
   };
-  if (names !== undefined) {
+  const addInit = () => { for (const address of parseWallets(config.wallets.join(','))) add(address, narrow(config.chains)); };
+  if (names !== undefined && names.trim().toLowerCase() === 'all') {
+    store.wallets().forEach(addSaved);
+    addInit();
+  } else if (names !== undefined) {
     for (const name of split(names)) {
       const saved = store.wallet(name);
-      if (!saved) throw new Error(`No saved wallet named "${name}". Run defi-tool wallet list to see your wallets, or use --wallet-addr for an address.`);
+      if (!saved) throw new Error(`No saved wallet named "${name}". Run defi-tool wallet list to see your wallets, use --wallet all, or --wallet-addr for an address.`);
       addSaved(saved);
     }
   }
@@ -712,14 +739,15 @@ function walletGroups(names: string | undefined, addresses: string | undefined, 
     }
   }
   if (names === undefined && addresses === undefined) {
-    store.wallets().forEach(addSaved);
-    for (const address of parseWallets(config.wallets.join(','))) add(address, narrow(config.chains));
+    const saved = defaultWallet(store, quiet);
+    if (saved && !isEvmChain(saved.chainId)) throw new Error(`The default wallet ${saved.name} is a Solana wallet; Uniswap positions are on EVM networks. Pass --wallet or --wallet-addr, or set an EVM default with defi-tool wallet set-default.`);
+    if (saved) addSaved(saved);
+    else addInit();
   }
-  if (skipped.length) console.error(`Note: skipping ${skipped.join(', ')}; Uniswap positions are read on EVM networks${chains ? ' in --chain' : ''}.`);
+  if (skipped.length) console.error(`Note: skipping ${skipped.join(', ')}; Uniswap positions are read on EVM networks.`);
   return [...groups.values()];
 }
 
-/** "ledger (0x902e…3f00) on Ethereum" or "0x902e…3f00 on all networks". */
 function groupLabel(group: WalletGroup): string {
   const names = [...new Set(Object.values(group.names ?? {}))];
   const address = `${group.address.slice(0, 6)}…${group.address.slice(-4)}`;
@@ -728,10 +756,10 @@ function groupLabel(group: WalletGroup): string {
   return `${names.length ? `${names.join(', ')} (${address})` : address} on ${networks}`;
 }
 
-const wallet = app.command('wallet').description('Save, list, rename, and delete wallets; show their balances and transaction history.');
-commandHelp(wallet, ['defi-tool wallet add 0xYourWallet --chain eth --name main', 'defi-tool wallet list', 'defi-tool wallet history main', 'defi-tool wallet edit main --name trading', 'defi-tool wallet delete trading'], [
+const wallet = app.command('wallet').description('Save, list, rename, and delete wallets, choose the default one, and show their balances and transaction history.');
+commandHelp(wallet, ['defi-tool wallet add 0xYourWallet --chain eth --name main', 'defi-tool wallet list', 'defi-tool wallet set-default main', 'defi-tool wallet history main', 'defi-tool wallet edit main --name trading', 'defi-tool wallet delete trading'], [
   'Wallets are saved in the local database by name. Only public addresses are stored; no private key is ever requested.',
-  'positions and alerts check every saved wallet on its network, or the ones named in --wallet.',
+  'Commands that take --wallet use the default wallet without it: the one set with wallet set-default, or else the latest added. --wallet all uses every saved wallet.',
 ]);
 wallet.action(() => wallet.outputHelp());
 
@@ -748,7 +776,9 @@ walletAdd.action((address: string, options: { chain: string; name?: string }) =>
   const chainId = parseWalletChain(options.chain);
   const name = options.name === undefined ? store.nextWalletName() : parseWalletName(options.name);
   const saved = store.addWallet({ name, address: parseWalletAddress(address, chainId), chainId });
-  console.log(`Saved ${saved.name}: ${saved.address} on ${CHAINS[saved.chainId].name}.`);
+  const current = store.defaultWallet();
+  const note = current?.wallet.name === saved.name ? ' It is now the default wallet (the latest added, until you choose one with defi-tool wallet set-default).' : '';
+  console.log(`Saved ${saved.name}: ${saved.address} on ${CHAINS[saved.chainId].name}.${note}`);
 }));
 
 const walletList = wallet.command('list').alias('ls').description('Show saved wallets with their network, address, balance, and dates.')
@@ -763,33 +793,34 @@ walletList.action((options: { balance: boolean; json?: boolean }) => withStore(a
   const balances = options.balance && wallets.length
     ? await walletBalances(wallets, new RpcProvider(config.rpcUrls), { solanaRpcUrl: config.rpcUrls[SOLANA], pricesUrl: process.env.DEFI_TOOL_PRICES_URL })
     : undefined;
-  printWallets(wallets, balances, Boolean(options.json));
-  if (!options.json && config.wallets.length) console.log(`\nAlso checked: ${config.wallets.length} wallet address(es) saved by init in the configuration file.`);
+  printWallets(wallets, balances, Boolean(options.json), store.defaultWallet());
+  if (!options.json && config.wallets.length) console.log(`\nAlso in the configuration file: ${config.wallets.length} wallet address(es) saved by init, read with --wallet all${wallets.length ? '' : ' and while no wallet is saved'}.`);
 }));
 
 const walletHistoryCommand = wallet.command('history').alias('tx')
   .description('Show a wallet\'s latest transactions: swaps, liquidity adds and removes, fee collects, transfers, with USD values and gas.')
-  .argument('<wallet>', 'saved wallet name, or a 0x address')
+  .argument('[wallet]', 'saved wallet name, or a 0x address (default: the default wallet, see wallet set-default)')
   .option('--chain <names>', 'networks, e.g. base,arb or all (default: the saved wallet\'s network; every network for an address)')
   .option('--days <count>', 'how far back to look, 1-365 days (default: 30)', '30')
   .option('--type <kinds>', `only these kinds, comma-separated: ${ACTIVITY_KINDS.join(', ')}, or lp (all liquidity kinds)`)
   .option('--top <count>', 'rows to show, 1-500 (default: 50)', '50')
   .option('--all', 'also show likely spam airdrops (unknown, unpriced tokens)')
   .option('--json', 'print structured JSON with full hashes and explorer links');
-commandHelp(walletHistoryCommand, ['defi-tool wallet history ledger1', 'defi-tool wallet history ledger1 --chain base,arb --days 90', 'defi-tool wallet history ledger1 --type swap --top 20', 'defi-tool wallet history 0xYourWallet --type lp --json'], [
+commandHelp(walletHistoryCommand, ['defi-tool wallet history', 'defi-tool wallet history ledger1', 'defi-tool wallet history ledger1 --chain base,arb --days 90', 'defi-tool wallet history ledger1 --type swap --top 20', 'defi-tool wallet history 0xYourWallet --type lp --json'], [
   'Liquidity activity (Uniswap v3/v4 adds, removes and fee collects) comes from Revert Finance, without a key.',
   'Swaps, sends, receives and wraps need a free Alchemy key: export ALCHEMY_API_KEY=... (or alchemyApiKey in the configuration file).',
   'Values are USD at the time of each transaction (DefiLlama). Swap cost = value sent − value received: price impact, pool fees and MEV.',
   'Likely spam airdrops are hidden unless --all. Approvals and transactions that moved no tokens are not listed.',
 ]);
-walletHistoryCommand.action((target: string, options: { chain?: string; days: string; type?: string; top: string; all?: boolean; json?: boolean }) => withStore(async (store, config) => {
+walletHistoryCommand.action((target: string | undefined, options: { chain?: string; days: string; type?: string; top: string; all?: boolean; json?: boolean }) => withStore(async (store, config) => {
   const days = parsePositiveInt(options.days, '--days')!;
   if (days > 365) throw new Error('--days supports 1 through 365.');
   const top = parsePositiveInt(options.top, '--top')!;
   if (top > 500) throw new Error('--top supports 1 through 500.');
-  const saved = store.wallet(target);
+  const saved = target === undefined ? defaultWallet(store, Boolean(options.json)) : store.wallet(target);
+  if (target === undefined && !saved) throw new Error('No saved wallets. Name a 0x address, e.g. defi-tool wallet history 0xYourWallet, or save one with defi-tool wallet add.');
   if (saved && !isEvmChain(saved.chainId)) throw new Error(`"${saved.name}" is a Solana wallet; history covers EVM networks.`);
-  const address = saved?.address ?? target.trim().toLowerCase();
+  const address = saved?.address ?? target!.trim().toLowerCase();
   if (!/^0x[0-9a-f]{40}$/.test(address)) throw new Error(`"${target}" is neither a saved wallet name nor a 0x address. Run defi-tool wallet list to see saved names.`);
   const evm = (Object.keys(CHAINS).map(Number) as ChainId[]).filter(isEvmChain);
   const chains = (parseChains(options.chain) ?? (saved ? [saved.chainId] : evm)).filter(isEvmChain);
@@ -808,6 +839,40 @@ walletHistoryCommand.action((target: string, options: { chain?: string; days: st
   }, { revert: new RevertClient({ endpoint: process.env.DEFI_TOOL_REVERT_URL }), alchemy }, (message) => console.error(message));
   const networks = chains.length === evm.length ? 'all networks' : chains.map((chain) => CHAINS[chain].name).join(', ');
   printHistory(result, { json: Boolean(options.json), title: `Wallet history · ${saved ? `${saved.name} (${shortAddress(address)})` : shortAddress(address)} on ${networks}`, days });
+}));
+
+const walletSetDefault = wallet.command('set-default').alias('default')
+  .description('Choose the wallet commands use when --wallet is not given.')
+  .argument('[wallet]', 'saved wallet name, its number in defi-tool wallet list, or its address (with --chain when saved on several networks); omit to show the current default')
+  .option('--chain <name>', 'the network, when the address is saved on more than one');
+commandHelp(walletSetDefault, ['defi-tool wallet set-default ledger1', 'defi-tool wallet set-default 2', 'defi-tool wallet set-default 0xYourWallet --chain base', 'defi-tool wallet set-default'], [
+  'Until one is chosen, the most recently added wallet is the default. Deleting the default falls back to that rule; renaming keeps it.',
+  'Used by positions list, detail, analyze and create, alerts check and wallet history when they run without --wallet. --wallet all still reads every saved wallet.',
+]);
+walletSetDefault.action((target: string | undefined, options: { chain?: string }) => withStore((store) => {
+  const describe = (saved: SavedWallet) => `${saved.name} (${saved.address} on ${CHAINS[saved.chainId].name})`;
+  if (target === undefined) {
+    const current = store.defaultWallet();
+    if (!current) throw new Error('No saved wallets. Add one with defi-tool wallet add 0xYourWallet --chain eth.');
+    console.log(`Default wallet: ${describe(current.wallet)}${current.chosen ? '' : ', the latest added; choose one with defi-tool wallet set-default <name>'}.`);
+    return;
+  }
+  const text = target.trim();
+  const wallets = store.wallets();
+  let saved = store.wallet(text);
+  if (!saved && /^\d+$/.test(text)) {
+    saved = wallets[Number(text) - 1];
+    if (!saved) throw new Error(`There is no wallet number ${text}; defi-tool wallet list shows ${wallets.length} wallet${wallets.length === 1 ? '' : 's'}.`);
+  }
+  if (!saved) {
+    const chainId = options.chain === undefined ? undefined : parseWalletChain(options.chain);
+    const matches = wallets.filter((item) => item.address.toLowerCase() === text.toLowerCase() && (chainId === undefined || item.chainId === chainId));
+    if (matches.length > 1) throw new Error(`${text} is saved on ${matches.map((item) => `${CHAINS[item.chainId].name} as ${item.name}`).join(' and ')}; add --chain or use the name.`);
+    saved = matches[0];
+  }
+  if (!saved) throw new Error(`No saved wallet "${text}". Use a name, number or address from defi-tool wallet list.`);
+  store.setDefaultWallet(saved.name);
+  console.log(`Default wallet: ${describe(saved)}. Commands use it when --wallet is not given.`);
 }));
 
 const walletDelete = wallet.command('delete').alias('rm').description('Delete a saved wallet by name.')

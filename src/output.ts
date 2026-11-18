@@ -139,28 +139,30 @@ export function printPositions(items: PositionAnalysis[], json: boolean): void {
 const formatTime = (iso: string | undefined): string => iso ? iso.slice(0, 16).replace('T', ' ') : MISSING;
 
 /** Saved wallets with their balances; balances maps names to holdings, or the error that prevented reading them. */
-export function printWallets(wallets: SavedWallet[], balances: Map<string, WalletBalance | Error> | undefined, json: boolean): void {
+export function printWallets(wallets: SavedWallet[], balances: Map<string, WalletBalance | Error> | undefined, json: boolean, defaults?: { wallet: SavedWallet; chosen: boolean }): void {
+  const isDefault = (wallet: SavedWallet) => defaults?.wallet.name === wallet.name;
   if (json) {
     return console.log(JSON.stringify({ schemaVersion: 1, data: wallets.map((wallet) => {
       const balance = balances?.get(wallet.name);
-      return { ...wallet, ...(balance instanceof Error ? { balanceError: balance.message } : balance ? { balance } : {}) };
+      return { ...wallet, default: isDefault(wallet), ...(balance instanceof Error ? { balanceError: balance.message } : balance ? { balance } : {}) };
     }) }, null, 2));
   }
   if (!wallets.length) return console.log('No saved wallets. Add one with defi-tool wallet add 0xYourWallet --chain eth --name my-wallet1.');
   const columns: Column[] = [
-    { header: 'Name' }, { header: 'Chain' }, { header: 'Type' }, { header: 'Address' },
+    { header: '#', align: 'right' }, { header: 'Name' }, { header: 'Default' }, { header: 'Chain' }, { header: 'Type' }, { header: 'Address' },
     ...(balances ? [{ header: 'Balance', align: 'right' as const }, { header: 'Holdings', max: 48 }] : []),
     { header: 'Added (UTC)' }, { header: 'Updated (UTC)' },
   ];
-  console.log(renderTable(columns, wallets.map((wallet) => {
+  console.log(renderTable(columns, wallets.map((wallet, index) => {
     const balance = balances?.get(wallet.name);
     const held = balance instanceof Error || !balance ? [] : balance.holdings.filter((holding) => holding.amount > 0);
     return [
-      wallet.name, CHAINS[wallet.chainId].name, wallet.address.startsWith('0x') ? 'EVM' : 'Solana', wallet.address,
+      String(index + 1), wallet.name, isDefault(wallet) ? (defaults!.chosen ? '★ default' : '★ latest') : '', CHAINS[wallet.chainId].name, wallet.address.startsWith('0x') ? 'EVM' : 'Solana', wallet.address,
       ...(balances ? [balance instanceof Error ? MISSING : formatUsd(balance?.valueUsd), balance instanceof Error ? 'unavailable' : held.map((holding) => `${formatNumber(holding.amount)} ${holding.symbol}`).join(', ') || 'empty'] : []),
       formatTime(wallet.createdAt), wallet.updatedAt === wallet.createdAt ? MISSING : formatTime(wallet.updatedAt),
     ];
   })));
+  if (defaults) console.log(`\n${defaults.chosen ? `★ default: ${defaults.wallet.name}, used when a command is run without --wallet.` : `★ latest: no default chosen, so ${defaults.wallet.name}, the latest added, is used when a command is run without --wallet.`} Change it with defi-tool wallet set-default <name|#>.`);
   const failed = wallets.filter((wallet) => balances?.get(wallet.name) instanceof Error);
   if (failed.length) console.error(`\nBalances unavailable: ${failed.map((wallet) => `${wallet.name} (${(balances!.get(wallet.name) as Error).message.split('\n')[0]})`).join('; ')}.`);
   if (balances) console.log('\nBalance: native coin plus well-known tokens (WETH, USDC, ... on Base and Arbitrum; SOL only on Solana), in USD at DefiLlama prices.');
