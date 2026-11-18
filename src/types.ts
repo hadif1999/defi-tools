@@ -183,8 +183,27 @@ export interface LpPosition {
   openedAt?: string;
   closedAt?: string;
   source: 'revert' | 'rpc';
+  /** The position's transactions, oldest first; only read for positions detail. */
+  events?: PositionEvent[];
+  /** Liquidity added by the first deposit, as a decimal string (closed positions report 0 today). */
+  depositLiquidity?: string;
   /** False when deposits, withdrawals and collected fees are unknown (on-chain fallback). */
   historyAvailable: boolean;
+}
+
+/** One transaction of a position: tokens added or removed, or fees collected, valued when it happened. */
+export interface PositionEvent {
+  kind: 'deposit' | 'withdraw' | 'collect';
+  /** Unix seconds. */
+  timestamp: number;
+  hash?: string;
+  /** Token amounts, always positive. */
+  amount0: number;
+  amount1: number;
+  /** Pool price at the time, token1 per token0. */
+  price?: number;
+  valueUsd?: number;
+  gasUsd?: number;
 }
 
 /** A wallet saved with defi-tool wallet add. EVM addresses are stored lowercase; Solana addresses keep their case. */

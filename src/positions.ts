@@ -19,7 +19,7 @@ export interface PortfolioResult {
  * in auto mode a failure falls back to reading the NFTs the wallet holds over RPC, which has no history.
  * Problems are reported as they happen; fails only when no wallet/network could be read at all.
  */
-export async function loadPortfolio(groups: WalletGroup[], source: PositionSource, clients: { revert: RevertClient; rpc: RpcProvider; pricesUrl?: string }, report: (message: string) => void): Promise<PortfolioResult> {
+export async function loadPortfolio(groups: WalletGroup[], source: PositionSource, clients: { revert: RevertClient; rpc: RpcProvider; pricesUrl?: string }, report: (message: string) => void, options: { events?: boolean } = {}): Promise<PortfolioResult> {
   const result: PortfolioResult = { positions: [], checked: [] };
   const fromRpc: LpPosition[] = [];
   let attempts = 0;
@@ -30,7 +30,7 @@ export async function loadPortfolio(groups: WalletGroup[], source: PositionSourc
     if (source !== 'rpc') {
       attempts += 1;
       try {
-        const found = await clients.revert.listPositions(group.address, group.chains);
+        const found = await clients.revert.listPositions(group.address, group.chains, options);
         result.positions.push(...found.map((position) => ({ ...position, walletName: group.names?.[position.chainId] })));
         group.chains.forEach((chainId) => result.checked.push({ address: group.address, chainId }));
         return;

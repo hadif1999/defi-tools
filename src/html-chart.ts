@@ -10,13 +10,13 @@ import type { ShowView } from './dex-show.js';
 // opens offline and can be kept or shared as a single file.
 
 /** The charting library's standalone build, read from node_modules (the package's exports do not list it). */
-function chartLibrary(): string {
+export function chartLibrary(): string {
   const manifest = createRequire(import.meta.url).resolve('lightweight-charts/package.json');
   return readFileSync(join(dirname(manifest), 'dist', 'lightweight-charts.standalone.production.js'), 'utf8');
 }
 
 /** A file in the project's assets/ folder, found from this module whether it runs from src/ or dist/src/. */
-function asset(path: string): string {
+export function asset(path: string): string {
   for (let dir = dirname(fileURLToPath(import.meta.url)); dir !== dirname(dir); dir = dirname(dir)) {
     if (existsSync(join(dir, 'package.json')) && existsSync(join(dir, 'assets', path))) return readFileSync(join(dir, 'assets', path), 'utf8');
   }
@@ -24,8 +24,8 @@ function asset(path: string): string {
 }
 
 /** Text made safe inside a <script> or <style> element. */
-const inline = (text: string) => text.replace(/<\/(script|style)/gi, '<\\/$1').replace(/<!--/g, '<\\!--');
-const escapeHtml = (text: string) => text.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
+export const inline = (text: string) => text.replace(/<\/(script|style)/gi, '<\\/$1').replace(/<!--/g, '<\\!--');
+export const escapeHtml = (text: string) => text.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 
 export function buildChartHtml(view: ShowView, generatedAt = new Date()): string {
   const chain = CHAINS[view.chainId as keyof typeof CHAINS]?.name ?? String(view.chainId);

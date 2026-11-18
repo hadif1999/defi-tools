@@ -25,11 +25,15 @@ import { RevertClient } from './providers/revert.js';
 import { loadPortfolio, splitPositions, type PositionSource, type WalletGroup } from './positions.js';
 import { GECKO_TIMEFRAMES, GeckoTerminalClient, OHLCV_PAGE, type GeckoPool, type Timeframe } from './providers/geckoterminal.js';
 import { feeTierFromPercent } from './providers/http.js';
-import { candleRange, datasetFileName, datasetHeader, downloadDataset, priceUnit, resolvePool, tokenMatches, MAX_HISTORY_DAYS } from './dex-data.js';
-import { parseInterval, TickerFeed, tickerJson, watchTicker, type Ticker } from './dex-ticker.js';
+import { type Candle, candleRange, datasetFileName, datasetHeader, downloadDataset, priceUnit, resolvePool, tokenMatches, MAX_HISTORY_DAYS } from './dex-data.js';
+import { currentPrice, parseInterval, TickerFeed, tickerJson, watchTicker, type Ticker } from './dex-ticker.js';
 import { cachedPools, listCachedFiles, loadShowData, type SeriesKey } from './dex-cache.js';
 import { openInBrowser, renderShow, showStats, type ShowView } from './dex-show.js';
 import { buildChartHtml } from './html-chart.js';
+import { buildPositionHtml } from './position-html.js';
+import { analyzePositionDetail, pickPosition } from './position-detail.js';
+import { renderPositionDetail, statusLine } from './position-view.js';
+import { invertPrice } from './positions-math.js';
 import { autoSample, buildCandles, coverage, sampleCandidates, sampleRequests, downloadSamples, marketFileName, marketRange, parseMarketPair, resolveCoin, writeMarketData, MARKET_TIMEFRAMES, SAMPLE_PERIODS, type Coin, type MarketDataset, type MarketTimeframe, type SamplePeriod } from './market-data.js';
 import { searchCoins } from './providers/coingecko.js';
 import { coinSymbols } from './providers/prices.js';
@@ -340,9 +344,9 @@ function parsePair(value: string): [string, string] {
   return [parts[0]!, parts[1]!];
 }
 
-const positions = app.command('positions').description('List your Uniswap LP positions (open and closed), check their ranges, or plan a new one.');
-commandHelp(positions, ['defi-tool positions list', 'defi-tool positions create WETH/USDC --chain base --wallet main --amount 100usd --lower-limit -15% --upper-limit +10%', 'defi-tool positions list --wallet wallet0', 'defi-tool positions list --wallet-addr 0xYourWallet --past', 'defi-tool positions analyze --wallet 0xYourWallet --chain eth'], [
-  'list shows open and closed positions with prices, ranges, balances, fees, APR and PnL. analyze checks range status only (used by alerts).',
+const positions = app.command('positions').description('List your Uniswap LP positions (open and closed), analyse one in depth, check their ranges, or plan a new one.');
+commandHelp(positions, ['defi-tool positions list', 'defi-tool positions create WETH/USDC --chain base --wallet main --amount 100usd --lower-limit -15% --upper-limit +10%', 'defi-tool positions list --wallet wallet0', 'defi-tool positions list --wallet-addr 0xYourWallet --past', 'defi-tool positions detail 1 --output html', 'defi-tool positions analyze --wallet 0xYourWallet --chain eth'], [
+  'list shows open and closed positions with prices, ranges, balances, fees, APR and PnL. detail analyses one in depth, with charts. analyze checks range status only (used by alerts).',
   'create builds the transactions for a new v3 position on Base or Arbitrum for your wallet to sign; it never signs or sends.',
   'Uses wallets saved with defi-tool wallet add (each on its network) or init, or pass --wallet; list also takes --wallet-addr. ls is an alias for list.',
 ]);
@@ -462,6 +466,120 @@ create.action(async (pair: string | undefined, options: { chain: string; wallet:
     deadlineSeconds: parseDeadline(options.deadline), payWith: options.payWith, approve: options.approve, pricesUrl: process.env.DEFI_TOOL_PRICES_URL,
   }, new RpcProvider(config.rpcUrls), (message) => console.error(message));
   printCreatePlan(plan, { json: Boolean(options.json), signer: options.signer });
+});
+
+const detail = positions.command('detail').alias('show')
+  .description('Analyse one position in depth: range, entry and exit, holdings, fees, PnL, impermanent loss, time in range, what-if prices and its transactions, with charts.')
+  .argument('<position>', 'NFT ID (#5723933 or 5723933), or a row number of defi-tool positions list (open positions; closed ones with --past or when none are open)')
+  .option('--wallet <names>', 'saved wallet name(s), comma-separated (default: all saved wallets)')
+  .option('--wallet-addr <addresses>', 'wallet address(es), comma-separated; read on every network unless --chain is given')
+  .option('--chain <names>', 'only these networks, e.g. base (needed when the same ID exists on two networks)')
+  .option('--past', 'a row number counts closed positions instead of open ones')
+  .option('--no-plot', 'leave out the charts (price chart with the range, and value against price)')
+  .addOption(choiceOption('--output <view>', 'terminal = report here; html = full report with interactive charts in your browser', ['terminal', 'html']).default('terminal'))
+  .addOption(choiceOption('--timeframe <size>', 'candle size for the price chart; auto picks one for how long the position was open', ['auto', '15m', '1h', '4h', '1d']).default('auto'))
+  .option('--html-file <path>', 'where to write the HTML report (default: <data-dir>/positions/position-<id>_<chain>.html)')
+  .option('--no-open', 'write the HTML report without opening a browser')
+  .option('--data-dir <path>', 'candle cache shared with dex-data (read first, missing candles are downloaded into it)', 'dex-data')
+  .option('--offline', 'use cached candles only; no GeckoTerminal requests')
+  .addOption(choiceOption('--source <provider>', 'auto = Revert Finance, falling back to on-chain reads; revert; rpc = on-chain only (no history)', ['auto', 'revert', 'rpc']).default('auto'))
+  .option('--width <columns>', 'terminal width to use (default: the terminal\'s)')
+  .option('--height <rows>', 'terminal height to use for the charts (default: the terminal\'s)')
+  .option('--no-color', 'plain text without colors')
+  .option('--json', 'print the whole analysis as JSON');
+commandHelp(detail, [
+  'defi-tool positions detail 1',
+  "defi-tool positions detail '#5723933' --output html",
+  'defi-tool positions detail 2 --past --no-plot',
+  'defi-tool positions detail 5723933 --wallet-addr 0xYourWallet --chain arb --json',
+], [
+  'The report: status and a range gauge, a price chart with the range, entry, exit, breakeven and every transaction, the position\'s value against price',
+  'next to holding its tokens, then holdings, performance (PnL, fees, impermanent loss, APR, against holding), time in range and volatility,',
+  'what-if prices for an open position, and the transaction list. --output html shows the same as an interactive page with tables and charts.',
+  'Positions come from Revert Finance (as positions list); candles are GeckoTerminal\'s, cached in --data-dir like dex-data show (180 days at most).',
+]);
+detail.action(async (reference: string, options: {
+  wallet?: string; walletAddr?: string; chain?: string; past?: boolean; plot: boolean; output: 'terminal' | 'html'; timeframe: 'auto' | Timeframe; htmlFile?: string; open: boolean;
+  dataDir: string; offline?: boolean; source: PositionSource; width?: string; height?: string; color: boolean; json?: boolean;
+}) => {
+  const config = await loadConfig(configPath());
+  const width = parsePositiveInt(options.width, '--width') ?? Math.max(80, process.stdout.columns ?? 120);
+  const height = parsePositiveInt(options.height, '--height') ?? Math.max(30, Math.min(60, (process.stdout.rows ?? 40) - 4));
+  const progress = (text: string) => { if (process.stderr.isTTY && !options.json) process.stderr.write(`\r\x1b[2K${text.slice(0, (process.stderr.columns ?? 100) - 1)}`); };
+  const store = new Store(config.databasePath);
+  let portfolio: Awaited<ReturnType<typeof loadPortfolio>>;
+  try {
+    const groups = walletGroups(options.wallet, options.walletAddr, parseChains(options.chain), config, store);
+    if (!groups.length) throw new Error('No wallets to read. Save one with defi-tool wallet add 0xYourWallet --chain eth, or pass --wallet-addr 0xYourWallet.');
+    progress('Reading positions…');
+    portfolio = await loadPortfolio(groups, options.source, { revert: new RevertClient({ endpoint: process.env.DEFI_TOOL_REVERT_URL }), rpc: new RpcProvider(config.rpcUrls), pricesUrl: process.env.DEFI_TOOL_PRICES_URL },
+      (message) => { progress(''); console.error(message); }, { events: true });
+  } finally { store.close(); }
+  const { position, how } = pickPosition(portfolio.positions, reference, { past: options.past, ordered: splitPositions(portfolio.positions) });
+
+  // The pool's candles in the position's price unit, from the cache first, for the chart and the time-in-range figures.
+  const nowMs = Date.now();
+  const now = Math.floor(nowMs / 1000);
+  const opened = position.openedAt ? Date.parse(position.openedAt) / 1000 : position.events?.[0]?.timestamp;
+  const closed = position.closedAt ? Date.parse(position.closedAt) / 1000 : undefined;
+  const quoteToken = invertPrice(position.token0.symbol, position.token1.symbol) ? position.token0 : position.token1;
+  let candles: Candle[] = [];
+  let timeframe: Timeframe | undefined;
+  let livePrice: number | undefined;
+  let dataNote: string | undefined;
+  if (!position.pool) dataNote = 'the position has no pool address';
+  else {
+    const held = ((closed ?? now) - (opened ?? now - 7 * 86_400));
+    const pad = Math.max(held * 0.3, 86_400);
+    const from = (opened ?? now - 7 * 86_400) - pad;
+    const to = closed === undefined ? now : Math.min(now, closed + pad);
+    const span = to - from;
+    timeframe = options.timeframe !== 'auto' ? options.timeframe : span <= 4 * 86_400 ? '15m' : span <= 30 * 86_400 ? '1h' : span <= 120 * 86_400 ? '4h' : '1d';
+    const step = GECKO_TIMEFRAMES[timeframe].seconds;
+    const client = options.offline ? undefined : new GeckoTerminalClient({ endpoint: process.env.DEFI_TOOL_GECKOTERMINAL_URL });
+    let pool: GeckoPool | undefined;
+    let unit: ReturnType<typeof priceUnit> | undefined;
+    let key: SeriesKey | undefined;
+    try {
+      if (client) {
+        progress('Reading the pool from GeckoTerminal…');
+        pool = await client.pool(position.chainId, position.pool);
+        unit = priceUnit(pool, quoteToken.address);
+        livePrice = currentPrice(pool, unit);
+        key = { chainId: pool.chainId, address: pool.address, priced: unit.priced.address, quote: unit.quote?.address };
+      }
+    } catch (error) { dataNote = `GeckoTerminal: ${(error as Error).message.replace(/\.$/, '')}`; }
+    if (!key) {
+      const cached = (await cachedPools(options.dataDir)).find(({ meta }) => meta.pool.chainId === position.chainId && meta.pool.address.toLowerCase() === position.pool!.toLowerCase() && meta.quoteToken?.address.toLowerCase() === quoteToken.address.toLowerCase());
+      if (cached) key = { chainId: cached.meta.pool.chainId, address: cached.meta.pool.address, priced: cached.meta.pricedToken.address, quote: cached.meta.quoteToken?.address };
+      else dataNote ??= `no cached candles for this pool in ${options.dataDir}`;
+    }
+    if (key) {
+      const range = alignRange(step, timeframe, from, to, now, false);
+      const data = await loadShowData({ directory: options.dataDir, key, timeframe, start: range.start, end: range.end, now, offline: !pool, refresh: false, client, pool, unit, pair: position.token0.symbol + '/' + position.token1.symbol, onProgress: progress });
+      candles = data.candles;
+      if (!candles.length) dataNote = 'no candles for the time the position was open';
+      else if (data.unavailable.length) dataNote = `Candles from ${isoTime(data.unavailable[0]![0]).slice(0, 10)} are missing: older than GeckoTerminal's 180 days and not in the cache, so time in range covers less than the whole position.`;
+    }
+  }
+  progress('');
+  const analysis = analyzePositionDetail({ position, candles, timeframe, step: timeframe && GECKO_TIMEFRAMES[timeframe].seconds, livePrice, now });
+  if (options.json) {
+    console.log(JSON.stringify({ schemaVersion: 1, data: { ...analysis, candles: candles.map((candle) => ({ time: isoTime(candle.timestamp), ...candle })) } }, null, 2));
+    return;
+  }
+  const color = options.color && !process.env.NO_COLOR && Boolean(process.stdout.isTTY);
+  if (!/^#?\d+$/.test(reference) || how.startsWith('row')) console.error(`Showing ${how}.`);
+  if (options.output === 'terminal') {
+    console.log(renderPositionDetail(analysis, { width, height, color, plot: options.plot, candles, timeframe, dataNote }));
+    return;
+  }
+  const file = options.htmlFile ?? join(options.dataDir, 'positions', `position-${position.id}_${CHAINS[position.chainId].slug}.html`);
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, buildPositionHtml(analysis, { candles, timeframe: timeframe ?? '1h', step: timeframe ? GECKO_TIMEFRAMES[timeframe].seconds : 3600, dataNote, plot: options.plot }));
+  console.log(`${analysis.pair}${analysis.feeTier === undefined ? '' : ` ${analysis.feeTier / 10_000}%`} #${analysis.id} on ${analysis.chain}: ${statusLine(analysis)}`);
+  const launched = options.open && await openInBrowser(resolve(file));
+  console.log(`${launched ? 'Opened' : 'Saved'} ${file}${launched ? ' in your browser' : options.open ? ' (no browser could be started; open it yourself)' : ''}.`);
 });
 
 const alerts = app.command('alerts').description('Check and persist actionable position alerts.');

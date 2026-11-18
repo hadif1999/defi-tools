@@ -116,6 +116,37 @@ Closed positions (4) · most recently closed first
 - **Fallback:** if Revert cannot be reached (or with `--source rpc`), the position NFTs the wallet still holds are read over public RPC, with USD prices from DefiLlama: price, range, status, balance and unclaimed fees are shown, but deposits, fees collected, PnL and dates are not, and burned NFTs are missed. Columns without any value are left out. `--source revert` fails instead of falling back. On-chain reads cover v3; v4 NFTs cannot be enumerated without an indexer.
 - No private key is ever requested.
 
+### One position in depth: `positions detail`
+
+```bash
+defi-tool positions detail 1                          # row 1 of positions list (open positions; closed ones when none are open)
+defi-tool positions detail 2 --past                   # row 2 of the closed table
+defi-tool positions detail '#5723933' --output html   # by NFT ID, as an interactive report in the browser
+defi-tool positions detail 5723933 --no-plot          # tables only, no charts
+defi-tool positions detail 1 --json                   # the whole analysis and its candles
+```
+
+The argument is an NFT ID (`#5723933` or `5723933`) or a row number of `positions list`; an ID wins when both could match, and `--chain` picks between the same ID on two networks. Wallets are chosen as for `list` (`--wallet`, `--wallet-addr`, `--chain`, `--source`). `detail` is also available as `show`.
+
+```text
+WETH/USDC 0.05%  Uniswap v3 · Arbitrum · position #5723933 · 0x902e…3f00
+■ Closed 2026-10-29 · exit price 2,305.85
+
+ ◆ 2,354.34 ├─────────────────────────▴──────────────────────────────────┤ 2,570.90
+   ◆ exit 2,305.85 · ▴ entry 2,442.87 · width 9.2% · USDC per WETH
+```
+
+- **Status and range gauge:** in range (how far through it), below or above (by how much, and which token it now holds), or closed with its exit price; the gauge places the price, entry and limits on a log scale.
+- **Charts** (on by default, `--no-plot` to leave out): the pool's candles with the range shaded, the lower and upper limits, entry, exit, breakeven and live price as lines, and each deposit (▲), fee collect ($) and withdrawal (▼) under its candle; then the position's **value against price** next to holding the tokens it had at entry, from its liquidity (the deposit's, for a closed position).
+- **Range:** limits, distance from the price to each, width, limits relative to entry, ticks and tick spacing, and concentration (how many times the capital a full-range position needs for the same liquidity).
+- **Holdings / tokens:** what an open position holds and its value split; for a closed one, the tokens deposited, withdrawn and collected, and the net change.
+- **Performance:** deposits, withdrawals, fees earned (per day), gas, PnL, impermanent loss and how much of it the fees covered, the result against holding the deposited tokens, fee and total APR, and for an open position the **breakeven** price above which lifetime PnL is positive.
+- **Time:** opened, closed, held, **time in range** and range exits (candle closes while open), high and low, volatility, and for an open position the typical time a move takes to reach each limit ((distance ÷ daily volatility)² days, not a forecast).
+- **What if the price moved now** (open positions): at −50% to +50% and at each limit, the tokens held, value, result against holding, and lifetime PnL.
+- **Transactions:** every deposit, fee collect and withdrawal with amounts, price, USD value, gas and an explorer link.
+- **`--output html`** writes the same as a report page (`<data-dir>/positions/position-<id>_<chain>.html`, or `--html-file`) and opens it (`--no-open` to skip): key-figure tiles, the range gauge, an interactive price chart (zoom, pan, hover values, 15m/1h/4h/1D) with the range band drawn for the time the position was open, value-against-price and impermanent-loss curves with a shared hover readout, the holdings donut, a PnL attribution waterfall (market move, liquidity effect, fees, gas), and the tables. It works offline and has light and dark themes.
+- **Candles** come from GeckoTerminal through the same cache as `dex-data show` (`--data-dir`, default `dex-data`; `--offline` uses the cache only). `--timeframe auto` picks 15m, 1h, 4h or 1d for how long the position was open; older than 180 days and not cached means the chart and time in range cover less.
+
 `positions analyze` keeps the earlier range check over RPC, which `alerts check` also uses:
 
 ```bash

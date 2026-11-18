@@ -71,7 +71,7 @@ export function poolVersion(pool: Pool): string {
   return pool.protocol.startsWith('v') ? pool.protocol : pool.protocol.toUpperCase();
 }
 
-interface Column { header: string; align?: 'left' | 'right'; max?: number }
+export interface Column { header: string; align?: 'left' | 'right'; max?: number }
 
 /** Plain aligned text table; no quotes or box characters, so it reads well and copies cleanly. */
 export function renderTable(columns: Column[], rows: string[][]): string {

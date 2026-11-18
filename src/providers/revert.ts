@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { EvmChainId, Leg, LpPosition, Protocol, WalletActivity } from '../types.js';
+import type { EvmChainId, Leg, LpPosition, PositionEvent, Protocol, WalletActivity } from '../types.js';
 import { annualize } from '../positions-math.js';
 import { finite, getJson } from './http.js';
 
@@ -16,6 +16,7 @@ const number = z.unknown().transform(finite);
 const usdPrice = z.object({ usd: number }).partial().optional();
 const cashFlowSchema = z.object({
   type: z.string(), timestamp: number, price: number, amount0: number, amount1: number, amount_usd: number,
+  liquidity: z.union([z.string(), z.number()]).transform(String).optional(),
   /** Gas flows: the fee in the native coin, negative. */
   amount: number, tx_hash: z.string().optional(),
   prices: z.object({ token0: usdPrice, token1: usdPrice }).partial().optional(),
@@ -60,11 +61,13 @@ export class RevertClient {
   constructor(private readonly options: RevertOptions = {}) { this.fetcher = options.fetcher ?? fetch; }
 
   /** Every Uniswap v3 and v4 position the address has held, open and closed, on the given networks. */
-  async listPositions(address: string, chains: readonly EvmChainId[]): Promise<LpPosition[]> {
+  async listPositions(address: string, chains: readonly EvmChainId[], options: { events?: boolean } = {}): Promise<LpPosition[]> {
     const lists = await Promise.all((Object.keys(exchanges) as Protocol[]).map(async (protocol) => (await this.pages(address, protocol)).map((row) => [protocol, row] as const)));
     return lists.flat().flatMap(([protocol, row]) => {
       const chainId = networks[row.network.toLowerCase()];
-      return chainId !== undefined && chains.includes(chainId) ? [this.toPosition(row, protocol, chainId, address)] : [];
+      if (chainId === undefined || !chains.includes(chainId)) return [];
+      const position = this.toPosition(row, protocol, chainId, address);
+      return [options.events ? { ...position, ...positionEvents(row.cash_flows) } : position];
     });
   }
 
@@ -182,4 +185,33 @@ export class RevertClient {
       source: 'revert', historyAvailable: true,
     };
   }
+}
+
+/**
+ * A position's transactions from its cash flows: deposits, withdrawals and fee collects, with the gas of the same
+ * transaction. Revert signs deposits negative (tokens leaving the wallet); amounts here are positive.
+ */
+export function positionEvents(raw: unknown[]): { events: PositionEvent[]; depositLiquidity?: string } {
+  const flows = raw.flatMap((flow) => { const parsed = cashFlowSchema.safeParse(flow); return parsed.success ? [parsed.data] : []; });
+  const kinds: Record<string, PositionEvent['kind']> = { deposits: 'deposit', withdrawals: 'withdraw', 'claimed-fees': 'collect' };
+  const gas = new Map<string, number>();
+  for (const flow of flows) if (flow.type === 'gas-costs' && flow.tx_hash) gas.set(flow.tx_hash, (gas.get(flow.tx_hash) ?? 0) + Math.abs(flow.amount_usd ?? 0));
+  const charged = new Set<string>();
+  const events = flows.flatMap((flow): PositionEvent[] => {
+    const kind = kinds[flow.type];
+    if (!kind || flow.timestamp === undefined) return [];
+    const [amount0, amount1] = [Math.abs(flow.amount0 ?? 0), Math.abs(flow.amount1 ?? 0)];
+    const [price0, price1] = [flow.prices?.token0?.usd, flow.prices?.token1?.usd];
+    // A transaction's gas is counted once, on its first event (a withdrawal and a collect can share one).
+    const fee = flow.tx_hash && !charged.has(flow.tx_hash) ? gas.get(flow.tx_hash) : undefined;
+    if (flow.tx_hash) charged.add(flow.tx_hash);
+    return [{
+      kind, timestamp: flow.timestamp, hash: flow.tx_hash, amount0, amount1,
+      price: flow.price ?? (price0 !== undefined && price1 ? price0 / price1 : undefined),
+      valueUsd: price0 === undefined || price1 === undefined ? undefined : amount0 * price0 + amount1 * price1,
+      gasUsd: fee,
+    }];
+  }).sort((a, b) => a.timestamp - b.timestamp);
+  const first = flows.filter((flow) => flow.type === 'deposits' && flow.liquidity && flow.liquidity !== '0').sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))[0];
+  return { events, depositLiquidity: first?.liquidity?.replace(/\.0+$/, '') };
 }
