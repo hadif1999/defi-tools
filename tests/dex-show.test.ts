@@ -130,13 +130,14 @@ test('figures for the range: change, high and low with their times, volume, vola
 test('the HTML page is self-contained, carries the data, and cannot be broken out of by its content', () => {
   const html = buildChartHtml({ ...view([candle(100 * H, 10)]), pair: 'A</script><b>/USDC' }, new Date('2026-10-29T12:00:00Z'));
   assert.match(html, /^<!doctype html>/);
-  assert.match(html, /LightweightCharts/); // The library is inlined.
-  assert.doesNotMatch(html, /<script src=/);
+  assert.match(html, /LightweightCharts/); // The library is inlined,
+  assert.match(html, /window\.chartApp/); // and so is the workspace script.
+  assert.doesNotMatch(html, /<script src=|<link /);
   assert.doesNotMatch(html, /A<\/script><b>/);
-  assert.match(html, /<title>A&lt;\/script&gt;&lt;b&gt;\/USDC chart<\/title>/);
-  const data = JSON.parse(/const DATA = (.*);\n/.exec(html)![1]!.replace(/<\\\//g, '</'));
+  assert.match(html, /<title>A&lt;\/script&gt;&lt;b&gt;\/USDC · Uniswap v3 0\.05% · Base<\/title>/);
+  const data = JSON.parse(/<script type="application\/json" id="chart-data">(.*?)<\/script>/s.exec(html)![1]!);
   assert.deepEqual(data.candles, [[100 * H, 10, 11, 9, 10, 10, 0]]);
-  assert.equal(data.priceUnit, 'USDC per WETH');
+  assert.deepEqual([data.pair, data.priceUnit, data.chainId], ['A</script><b>/USDC', 'USDC per WETH', 8453]);
 });
 
 test('dex-data show charts cached downloads offline, as text or JSON', async () => {
