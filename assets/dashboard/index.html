@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>defi-tool dashboard</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+<script src="/js/theme.js"></script>
+</head>
+<body>
+<div class="shell" id="shell" data-version="{{version}}">
+  <aside class="side" id="side" aria-label="Navigation">
+    <div class="brand"><span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-7 4 4 8-9"/></svg></span><span class="name">defi-tool <small>v{{version}}</small></span></div>
+    <nav class="nav" id="nav"></nav>
+    <div class="side-foot" id="side-foot"><span class="dot wait" id="conn-dot"></span><span class="text" id="conn-text">Connecting…</span></div>
+  </aside>
+  <header class="top" id="top"></header>
+  <main class="main" id="main" tabindex="-1"><noscript><p style="padding:24px">The dashboard needs JavaScript.</p></noscript></main>
+</div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>
